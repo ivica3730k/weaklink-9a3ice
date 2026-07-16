@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import zlib
 from dataclasses import dataclass
@@ -150,6 +151,26 @@ def split_minimodem_passthrough(argv: list[str]) -> tuple[list[str], list[str]]:
     return filtered, passthrough
 
 
+def child_environment_without_pyinstaller_leak() -> dict[str, str]:
+    """Return an environment safe for spawning ``minimodem``.
+
+    PyInstaller onefile bundles set ``LD_LIBRARY_PATH`` (and ``DYLD_LIBRARY_PATH``
+    on macOS) to point at the bundle's extracted lib directory, and stash the
+    caller's original value in ``LD_LIBRARY_PATH_ORIG``. A child process
+    inherits that value by default, which prevents ``minimodem`` from loading
+    the system's ALSA / PulseAudio backends and silently drops audio output.
+    Restore the original (or unset the variable) so minimodem sees a clean env.
+    """
+    child_env = os.environ.copy()
+    for variable_name in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"):
+        original_value = child_env.pop(f"{variable_name}_ORIG", None)
+        if original_value is not None:
+            child_env[variable_name] = original_value
+        else:
+            child_env.pop(variable_name, None)
+    return child_env
+
+
 def build_minimodem_argv(
     direction: str,
     passthrough_args: list[str],
@@ -171,7 +192,9 @@ def run_tx(
 ) -> int:
     """Read from ``input_stream``, frame it, and stream it into minimodem."""
     input_bytes = input_stream.read()
-    with subprocess.Popen(minimodem_argv, stdin=subprocess.PIPE) as modem_process:
+    with subprocess.Popen(
+        minimodem_argv, stdin=subprocess.PIPE, env=child_environment_without_pyinstaller_leak()
+    ) as modem_process:
         assert modem_process.stdin is not None
         if framer.config.fec_enabled:
             block_bytes = framer.data_bytes
@@ -199,7 +222,9 @@ def run_rx(
     output_stream: BinaryIO,
 ) -> int:
     """Read framed bytes from minimodem and write decoded payloads to ``output_stream``."""
-    with subprocess.Popen(minimodem_argv, stdout=subprocess.PIPE) as modem_process:
+    with subprocess.Popen(
+        minimodem_argv, stdout=subprocess.PIPE, env=child_environment_without_pyinstaller_leak()
+    ) as modem_process:
         assert modem_process.stdout is not None
         if framer.config.fec_enabled:
             _rx_stream_with_fec(modem_process.stdout, framer, output_stream)
