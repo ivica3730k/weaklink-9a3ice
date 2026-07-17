@@ -7,6 +7,8 @@ import string
 from dataclasses import dataclass
 from pathlib import Path
 
+import io
+
 import numpy as np
 import pytest
 
@@ -20,36 +22,37 @@ def _strip_trailing_nul(data: bytes) -> bytes:
     return data.rstrip(b"\x00")
 
 
-def test_short_payload_clean_wav_roundtrip(tmp_path: Path) -> None:
-    """CLI TX -> WAV -> CLI RX -> bytes match (with trailing NUL strip)."""
-    message = b"weaklink modem streaming hello"
-    message_file = tmp_path / "msg.bin"
-    wav_file = tmp_path / "signal.wav"
-    output_file = tmp_path / "out.bin"
-    message_file.write_bytes(message)
+class _FakeStdio:
+    def __init__(self, initial: bytes = b"") -> None:
+        self.buffer = io.BytesIO(initial)
 
-    tx_exit = modem_main(["tx", "--input", str(message_file), "--wav", str(wav_file)])
+
+def _cli_roundtrip(monkeypatch, message: bytes, wav_file: Path) -> bytes:
+    monkeypatch.setattr("sys.stdin", _FakeStdio(message))
+    tx_exit = modem_main(["tx", "--modem-wav", str(wav_file)])
     assert tx_exit == 0
     assert wav_file.exists() and wav_file.stat().st_size > 0
 
-    rx_exit = modem_main(["rx", "--output", str(output_file), "--wav", str(wav_file)])
+    fake_out = _FakeStdio()
+    monkeypatch.setattr("sys.stdout", fake_out)
+    rx_exit = modem_main(["rx", "--modem-wav", str(wav_file)])
     assert rx_exit == 0
-    assert output_file.read_bytes() == message
+    return fake_out.buffer.getvalue()
 
 
-def test_random_100_bytes_clean_wav_roundtrip(tmp_path: Path) -> None:
+def test_short_payload_clean_wav_roundtrip(tmp_path: Path, monkeypatch) -> None:
+    """CLI TX (stdin) -> WAV -> CLI RX (stdout) -> bytes match."""
+    message = b"weaklink modem streaming hello"
+    wav_file = tmp_path / "signal.wav"
+    assert _cli_roundtrip(monkeypatch, message, wav_file) == message
+
+
+def test_random_100_bytes_clean_wav_roundtrip(tmp_path: Path, monkeypatch) -> None:
     alphabet = (string.ascii_letters + string.digits + string.punctuation + " ").encode("ascii")
     rng = random.Random(7)
     message = bytes(rng.choices(alphabet, k=100))
-
-    message_file = tmp_path / "msg.bin"
     wav_file = tmp_path / "signal.wav"
-    output_file = tmp_path / "out.bin"
-    message_file.write_bytes(message)
-
-    modem_main(["tx", "--input", str(message_file), "--wav", str(wav_file)])
-    modem_main(["rx", "--output", str(output_file), "--wav", str(wav_file)])
-    assert output_file.read_bytes() == message
+    assert _cli_roundtrip(monkeypatch, message, wav_file) == message
 
 
 def test_wav_file_is_reloadable(tmp_path: Path) -> None:

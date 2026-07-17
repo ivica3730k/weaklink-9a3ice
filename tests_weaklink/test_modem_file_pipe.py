@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import random
 import string
 from pathlib import Path
@@ -11,6 +12,11 @@ import numpy as np
 from weaklink.modem.cli import main as modem_main
 from weaklink.modem.codec import ModemConfig, decode, encode
 from weaklink.modem.waveform import WaveformConfig
+
+
+class _FakeStdio:
+    def __init__(self, initial: bytes = b"") -> None:
+        self.buffer = io.BytesIO(initial)
 
 
 def _random_text(size: int, seed: int) -> bytes:
@@ -50,15 +56,14 @@ def test_odd_sized_file_pads_and_strips_correctly() -> None:
     assert len(decoded) == 97
 
 
-def test_e2e_cli_pipes_a_file(tmp_path: Path) -> None:
+def test_e2e_cli_pipes_a_file(tmp_path: Path, monkeypatch) -> None:
     payload = _random_text(400, seed=5)
-    input_file = tmp_path / "message.txt"
     wav_file = tmp_path / "signal.wav"
-    output_file = tmp_path / "received.txt"
-    input_file.write_bytes(payload)
 
-    tx_exit = modem_main(["tx", "--input", str(input_file), "--wav", str(wav_file)])
-    assert tx_exit == 0
-    rx_exit = modem_main(["rx", "--output", str(output_file), "--wav", str(wav_file)])
-    assert rx_exit == 0
-    assert output_file.read_bytes() == payload
+    monkeypatch.setattr("sys.stdin", _FakeStdio(payload))
+    assert modem_main(["tx", "--modem-wav", str(wav_file)]) == 0
+
+    fake_out = _FakeStdio()
+    monkeypatch.setattr("sys.stdout", fake_out)
+    assert modem_main(["rx", "--modem-wav", str(wav_file)]) == 0
+    assert fake_out.buffer.getvalue() == payload

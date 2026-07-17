@@ -117,42 +117,44 @@ sudo apt install libportaudio2 libsndfile1
 
 ## CLI: `weaklink-modem`
 
-Both sides launch with matching config; there are no headers on the wire.
+Byte-side I/O is always stdin/stdout — use shell redirection for files or
+pipes. Sample-side is either a WAV file (`--modem-wav`) or the default live
+audio device.
 
 Simple loopback via WAV:
 
 ```bash
-echo -n "hello over air" | poetry run weaklink-modem tx --wav /tmp/out.wav
-poetry run weaklink-modem rx --wav /tmp/out.wav
+echo -n "hello over air" | poetry run weaklink-modem tx --modem-wav /tmp/out.wav
+poetry run weaklink-modem rx --modem-wav /tmp/out.wav
 ```
 
 Pipe an arbitrary-length file end to end:
 
 ```bash
-poetry run weaklink-modem tx --input long_message.txt --wav /tmp/file.wav
-poetry run weaklink-modem rx --output received.txt   --wav /tmp/file.wav
+poetry run weaklink-modem tx --modem-wav /tmp/file.wav < long_message.txt
+poetry run weaklink-modem rx --modem-wav /tmp/file.wav > received.txt
 ```
 
-Live PulseAudio (default device on Linux; CoreAudio on macOS):
+Live audio (PulseAudio on Linux, CoreAudio on macOS):
 
 ```bash
-poetry run weaklink-modem tx < message.txt
-poetry run weaklink-modem rx --record-seconds 30 > received.bin
+poetry run weaklink-modem tx < message.txt   # plays through default output
+poetry run weaklink-modem rx > received.bin  # records from default input, Ctrl-C to stop
 ```
 
 Slower baud + more sync markers for a noisy HF channel:
 
 ```bash
 COMMON="--modem-baud 45 --modem-sync-every-blocks 2"
-poetry run weaklink-modem tx $COMMON --input msg.txt --wav /tmp/hf.wav
-poetry run weaklink-modem rx $COMMON --wav /tmp/hf.wav
+poetry run weaklink-modem tx $COMMON --modem-wav /tmp/hf.wav < msg.txt
+poetry run weaklink-modem rx $COMMON --modem-wav /tmp/hf.wav > out.txt
 ```
 
 ## CLI options
 
-| Flag | Default | Description |
-|------|---------|-------------|
-Modem-layer flags (all prefixed `--modem-*`, feed into `ModemConfig`):
+All modem-side knobs are prefixed `--modem-*` (they feed into `ModemConfig`).
+Byte I/O is always stdin/stdout — there are no `--input`/`--output` flags,
+use shell redirection.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -164,14 +166,7 @@ Modem-layer flags (all prefixed `--modem-*`, feed into `ModemConfig`):
 | `--modem-no-rs-crc` | CRC on | Strip the 4-byte payload CRC that RS uses to reject bogus decodes. |
 | `--modem-sync-every-blocks N` | `4` | Preamble inserted every N data blocks. Smaller N = faster re-sync at low SNR, more overhead. |
 | `--modem-block-repeats N` | `1` | Each block transmitted N times, round-robin. RX sums soft LLRs. ~2 dB per doubling in AWGN + burst-fade diversity. |
-
-I/O flags (plain names):
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--input PATH` | stdin | TX-only: read bytes from a file. |
-| `--output PATH` | stdout | RX-only: write bytes to a file. |
-| `--wav PATH` | live audio | Read/write a WAV file instead of the audio device. When RX omits it, RX blocks recording from the default input device until Ctrl-C, then decodes what it captured. |
+| `--modem-wav PATH` | live audio | Read from / write to a WAV file instead of the audio device. When RX omits it, RX blocks recording from the default input device until Ctrl-C, then decodes what it captured. |
 
 ## Running the tests
 
