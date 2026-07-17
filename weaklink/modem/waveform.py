@@ -97,9 +97,13 @@ def modulate(symbols: np.ndarray, config: WaveformConfig) -> np.ndarray:
     return (config.amplitude * signal).astype(np.float32)
 
 
-def demodulate_soft(samples: np.ndarray, config: WaveformConfig) -> np.ndarray:
+def demodulate_soft(samples: np.ndarray, config: WaveformConfig, *, frequency_offset_hz: float = 0.0) -> np.ndarray:
     """Non-coherent demod. Returns an ``(N, 4)`` array of squared magnitudes,
-    one row per symbol, one column per tone."""
+    one row per symbol, one column per tone.
+
+    ``frequency_offset_hz`` shifts the reference tones — pass the estimate from
+    :func:`estimate_frequency_offset` when TX and RX radios have imperfect LOs.
+    """
     samples_per_symbol = config.samples_per_symbol
     num_symbols = len(samples) // samples_per_symbol
     if num_symbols == 0:
@@ -110,12 +114,97 @@ def demodulate_soft(samples: np.ndarray, config: WaveformConfig) -> np.ndarray:
     time_axis = np.arange(samples_per_symbol) / config.sample_rate
     magnitudes_sq = np.empty((num_symbols, NUM_TONES), dtype=np.float64)
     for tone_index, freq in enumerate(config.tones_hz):
-        cos_wave = np.cos(2.0 * np.pi * freq * time_axis)
-        sin_wave = np.sin(2.0 * np.pi * freq * time_axis)
+        adjusted_freq = freq + frequency_offset_hz
+        cos_wave = np.cos(2.0 * np.pi * adjusted_freq * time_axis)
+        sin_wave = np.sin(2.0 * np.pi * adjusted_freq * time_axis)
         in_phase = windowed @ cos_wave
         quadrature = windowed @ sin_wave
         magnitudes_sq[:, tone_index] = in_phase ** 2 + quadrature ** 2
     return magnitudes_sq
+
+
+def estimate_coarse_frequency_offset(
+    samples: np.ndarray,
+    config: WaveformConfig,
+    *,
+    search_range_hz: float = 1500.0,
+) -> float:
+    """FFT-based coarse offset estimate.
+
+    We don't need to know the preamble content to find the tones — they show
+    up as peaks in the magnitude spectrum wherever they landed. Sweep candidate
+    offsets and pick the one that puts the most energy on the 4 expected tone
+    positions. Good to ~ (sample_rate / len(samples)) resolution — for a 2s
+    preamble at 48 kHz that's ~0.5 Hz, but we cap the loop step for speed.
+    """
+    if len(samples) == 0:
+        return 0.0
+    fft_length = len(samples)
+    spectrum = np.abs(np.fft.rfft(np.asarray(samples, dtype=np.float64), n=fft_length))
+    bin_hz = config.sample_rate / fft_length
+    step_hz = max(bin_hz, 2.0)
+
+    offsets = np.arange(-search_range_hz, search_range_hz + step_hz, step_hz)
+    best_offset = 0.0
+    best_score = -np.inf
+    for offset in offsets:
+        total = 0.0
+        for tone in config.tones_hz:
+            bin_index = int(round((tone + offset) / bin_hz))
+            if 0 <= bin_index < len(spectrum):
+                total += spectrum[bin_index]
+        if total > best_score:
+            best_score = total
+            best_offset = float(offset)
+    return best_offset
+
+
+def estimate_frequency_offset(
+    samples: np.ndarray,
+    config: WaveformConfig,
+    expected_symbols: np.ndarray,
+    *,
+    search_range_hz: float = 50.0,
+    resolution_hz: float = 1.0,
+    prior_offset_hz: float = 0.0,
+) -> float:
+    """Estimate the TX/RX frequency offset from a known symbol sequence.
+
+    Given ``samples`` known to contain ``expected_symbols`` (e.g. the preamble),
+    sweep frequency offsets in ``[prior_offset_hz ± search_range_hz]`` and pick
+    the one that maximises the total energy landing on the "correct" tone
+    across all preamble positions.
+
+    Returns the absolute offset in Hz (not a residual). ``prior_offset_hz`` is
+    where the coarse stage put us; the fine stage refines around it.
+    """
+    samples_per_symbol = config.samples_per_symbol
+    expected_length = len(expected_symbols) * samples_per_symbol
+    if len(samples) < expected_length:
+        return prior_offset_hz
+    windowed = np.asarray(samples[:expected_length], dtype=np.float64).reshape(len(expected_symbols), samples_per_symbol)
+    time_axis = np.arange(samples_per_symbol) / config.sample_rate
+
+    offsets = np.arange(
+        prior_offset_hz - search_range_hz,
+        prior_offset_hz + search_range_hz + resolution_hz,
+        resolution_hz,
+    )
+    best_offset = prior_offset_hz
+    best_score = -np.inf
+    for offset in offsets:
+        total_correct_energy = 0.0
+        for position, symbol in enumerate(expected_symbols):
+            freq = config.tones_hz[int(symbol)] + offset
+            cos_wave = np.cos(2.0 * np.pi * freq * time_axis)
+            sin_wave = np.sin(2.0 * np.pi * freq * time_axis)
+            in_phase = windowed[position] @ cos_wave
+            quadrature = windowed[position] @ sin_wave
+            total_correct_energy += in_phase ** 2 + quadrature ** 2
+        if total_correct_energy > best_score:
+            best_score = total_correct_energy
+            best_offset = float(offset)
+    return best_offset
 
 
 def soft_bits_from_magnitudes(magnitudes_sq: np.ndarray) -> np.ndarray:

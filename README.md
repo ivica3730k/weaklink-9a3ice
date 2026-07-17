@@ -132,3 +132,135 @@ With `--parity-bytes 8` you can correct up to 4 byte errors per block; with
   zero-padding TX uses to fill the final block.
 - With `--no-fec` (or `--no-rs`) the wrapper is a straight `minimodem` process
   with argument passthrough — useful for A/B'ing framed vs. unframed runs.
+
+---
+
+# weaklink — 4-FSK weak-signal modem
+
+The `weaklink` package is a standalone Python 4-FSK modem designed for HF SSB
+weak-signal work. It doesn't share code with the minimodem wrapper above; think
+of it as the "next generation" transport once you've hit the minimodem cliff.
+
+## Signal chain
+
+```
+payload bytes
+  └─ RS(24,16)+CRC ──▶ conv encode (K=7, r=1/2) ──▶ interleave ──▶
+     4-FSK symbols ──▶ [preamble][payload repeated N times] ──▶ CPFSK ──▶ audio
+                                                                              │
+                                                                              ▼
+     ◀── RS decode ◀── soft Viterbi ◀── deinterleave ◀── soft magnitude combine ◀──
+     ◀── preamble sync + freq-offset compensation ◀── non-coherent 4-FSK demod ◀──
+```
+
+Baseline SNR performance measured in a 3 kHz reference bandwidth:
+
+| Config | Cliff SNR | Payload | Duration | Notes |
+|---|---:|---|---:|---|
+| 300 baud, no RS, no repeat | −3 dB | 21 bytes | ~1 s | modem baseline |
+| 30 baud, no RS, no repeat | −15 dB | 21 bytes | ~5 s | slower symbols = more Es/N0 |
+| 30 baud, RS(24,16), 3× repeat | **−17 dB** | 15 chars | ~28 s | weak-signal preset |
+
+For reference, the Shannon limit at 30 bit/s in 3 kHz is −21.6 dB. LDPC in
+place of Viterbi would close another 2–4 dB of the gap.
+
+## Install
+
+```bash
+poetry install
+```
+
+Adds `numpy`, `soundfile` (WAV), and `sounddevice` (PulseAudio via PortAudio
+on Linux) on top of the existing deps.
+
+On Debian/Ubuntu you'll also want the system audio libraries:
+
+```bash
+sudo apt install libportaudio2 libsndfile1
+```
+
+## CLI: `weaklink-modem`
+
+Two subcommands, same shape as `minimodem-rs`. All framing options are
+first-level; TX and RX must be launched with matching values (no on-wire
+headers).
+
+Simple loopback via WAV:
+
+```bash
+echo -n "hello over air" | poetry run weaklink-modem tx --wav /tmp/out.wav
+poetry run weaklink-modem rx --wav /tmp/out.wav --length 14
+```
+
+Weak-signal preset (15 chars, 30 baud, RS + 3× repeat, ~28 s per packet,
+survives down to −17 dB SNR and up to 1 kHz SSB LO error):
+
+```bash
+COMMON="--baud 30 --tone-spacing 30 --preamble-length 64 --payload-repeats 3 \
+        --rs-data-bytes 16 --rs-parity-bytes 8"
+
+echo -n "HELLO OM 73 DE!" | \
+  poetry run weaklink-modem tx $COMMON --wav /tmp/weak.wav
+
+poetry run weaklink-modem rx $COMMON --wav /tmp/weak.wav --length 15
+```
+
+Live PulseAudio (default device on Linux; CoreAudio on macOS):
+
+```bash
+# TX plays the modulated audio out of the default audio device
+poetry run weaklink-modem tx $COMMON < message.txt
+
+# RX records for a given number of seconds
+poetry run weaklink-modem rx $COMMON --record-seconds 30 --length 15
+```
+
+## CLI options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--baud N` | `300` | Symbol rate. Every 10× drop buys ~10 dB of SNR budget. |
+| `--tone-spacing HZ` | `--baud` | 4-FSK tone spacing. Match to baud for orthogonality. |
+| `--sample-rate HZ` | `48000` | Audio sample rate. |
+| `--preamble-length N` | `64` | Sync preamble in symbols. Longer = more robust sync at low SNR. |
+| `--payload-repeats N` | `1` | Repeat encoded payload N times. RX averages magnitudes; ~3 dB per doubling. |
+| `--rs-data-bytes N` | disabled | Enable Reed-Solomon outer with N data bytes per block. |
+| `--rs-parity-bytes N` | `8` | RS parity bytes (corrects up to N/2 byte errors). |
+| `--no-rs-crc` | CRC on | Strip the 4-byte payload CRC that RS uses to reject bogus decodes. |
+| `--wav PATH` | live audio | Read/write a WAV file instead of the audio device. |
+| `--length N` | required for RX | Expected payload length in bytes. |
+
+## Handling a wide SSB LO offset
+
+For very cold-start use where the two rigs might disagree on the dial
+frequency by up to ~1 kHz, enable coarse offset search:
+
+```python
+from weaklink.modem.codec import ModemConfig
+from weaklink.modem.waveform import WaveformConfig
+config = ModemConfig(
+    waveform=WaveformConfig(baud=30, tone_spacing_hz=30),
+    coarse_frequency_search_hz=1500.0,  # FFT-based coarse pre-sync
+    ...
+)
+```
+
+Costs ~1 second of decode time. Not exposed on the CLI yet — set via the
+library config.
+
+## Running the tests
+
+Unit + integration tests:
+
+```bash
+poetry run pytest -q
+```
+
+Long SNR-sweep tests (marked `slow`) produce a printed table:
+
+```bash
+poetry run pytest -m slow -v -s
+```
+
+The suite runs on GitHub Actions; the `slow` marker is included in CI so the
+SNR baselines are re-measured on every push.

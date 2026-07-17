@@ -28,6 +28,12 @@ def _build_parser() -> argparse.ArgumentParser:
         sub = subparsers.add_parser(name)
         sub.add_argument("--baud", type=float, default=300.0)
         sub.add_argument("--sample-rate", type=float, default=48_000.0)
+        sub.add_argument("--tone-spacing", type=float, default=None, help="Tone spacing in Hz. Defaults to baud.")
+        sub.add_argument("--preamble-length", type=int, default=64, help="Preamble length in symbols.")
+        sub.add_argument("--payload-repeats", type=int, default=1, help="Repeat the payload N times for soft combining gain.")
+        sub.add_argument("--rs-data-bytes", type=int, default=None, help="Enable RS outer code with this many data bytes.")
+        sub.add_argument("--rs-parity-bytes", type=int, default=8)
+        sub.add_argument("--no-rs-crc", dest="rs_crc_enabled", action="store_false", default=True)
         sub.add_argument("--wav", type=Path, help="Read from / write to a WAV file instead of the audio device.")
 
     tx_parser = subparsers.choices["tx"]
@@ -46,7 +52,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _make_config(args: argparse.Namespace) -> ModemConfig:
-    return ModemConfig(waveform=WaveformConfig(baud=args.baud, sample_rate=args.sample_rate))
+    tone_spacing = args.tone_spacing if args.tone_spacing is not None else args.baud
+    return ModemConfig(
+        waveform=WaveformConfig(baud=args.baud, sample_rate=args.sample_rate, tone_spacing_hz=tone_spacing),
+        preamble_length=args.preamble_length,
+        payload_repeats=args.payload_repeats,
+        rs_data_bytes=args.rs_data_bytes,
+        rs_parity_bytes=args.rs_parity_bytes,
+        rs_crc_enabled=args.rs_crc_enabled,
+    )
 
 
 def _run_tx(args: argparse.Namespace) -> int:
