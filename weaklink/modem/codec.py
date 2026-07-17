@@ -87,10 +87,6 @@ class ModemConfig:
     HF LO / dial drift up to a few hundred Hz."""
     frequency_search_hz: float = 20.0
     frequency_resolution_hz: float = 1.0
-    preamble_min_score_ratio: float = 0.7
-    """Preamble correlator threshold, as a fraction of the peak preamble score
-    on this transmission. Below this, a candidate offset is considered noise.
-    Higher = fewer false positives, more risk of missing weak preambles."""
 
     def __post_init__(self) -> None:
         if self.sync_every_blocks < 1:
@@ -438,24 +434,32 @@ def _decode_one_block_from_soft(
     return codec.try_decode_with_stats(wire_bytes)
 
 
+_PREAMBLE_SCORE_RATIO = 0.7
+"""Preamble correlator threshold: candidates must score ``>= ratio * peak``."""
+
+
 def _find_preamble_peaks(
     magnitudes: np.ndarray, preamble: np.ndarray, config: ModemConfig
 ) -> list[int]:
-    """Return preamble positions with a robust, MAD-based threshold.
+    """Return preamble positions above a ratio-of-peak threshold, with a
+    signal-presence gate that rejects noise-only buffers outright.
 
-    The old ``threshold = 0.7 * max(scores)`` masked real preambles whenever a
-    single spurious high-scoring position (buffer edge transient, narrowband
-    interferer) landed above them. We now measure noise floor via the median +
-    MAD of the score distribution -- these are dominated by the many
-    noise-only offsets and are essentially blind to a handful of real-preamble
-    outliers.
+    Two-stage design:
 
-    Rules:
-      * If no offset scores enough sigmas above the noise floor, return [].
-        Real preambles land many sigmas above; noise-only buffers land nowhere.
-      * Otherwise, keep every offset above ``median + ratio * (peak - median)``,
-        i.e. the same "70 % of the way from noise floor to peak" idea, but
-        computed against the noise floor rather than zero.
+    1. **Signal-presence gate.** On pure noise, ``peak / robust-sigma`` sits at
+       just a few σ (extreme-value statistics for a few thousand samples).
+       Real preambles push the peak-vs-noise ratio much higher. If the peak
+       isn't at least ~6 robust-σ above the noise centre, we treat the buffer
+       as "no signal here yet" and return [].
+
+       The noise centre + robust-σ are estimated from the *lower half* of
+       scores. This avoids contamination from real-preamble outliers and their
+       PN autocorrelation sidelobes -- both of which sit in the upper half.
+
+    2. **Candidate selection.** Keep offsets scoring ``>= 0.7 * peak``. On a
+       clean signal, real preambles score ~100% of peak and sidelobes score
+       ~33% -- the 0.7 line cleanly separates them without dropping real
+       peaks that faded modestly.
     """
     preamble_length = len(preamble)
     if magnitudes.shape[0] < preamble_length:
@@ -473,23 +477,27 @@ def _find_preamble_peaks(
     if scores.size == 0:
         return []
 
-    median_score = float(np.median(scores))
-    mad = float(np.median(np.abs(scores - median_score)))
-    # MAD -> gaussian sigma conversion. Small floor keeps this defined when
-    # MAD collapses to zero on degenerate inputs.
-    sigma = max(1.4826 * mad, 1e-9)
     peak_score = float(scores.max())
-
-    # Require the peak to sit clearly above the noise-only distribution. 6 σ
-    # gives a false-alarm rate of ~2 * 10^-9 per offset before FEC -- with
-    # ~50k offsets in a 60 s buffer at 300 baud we still expect << 1 false
-    # peak per RX session on pure noise.
-    if (peak_score - median_score) < 6.0 * sigma:
-        return []
     if peak_score <= 0.0:
         return []
 
-    threshold = median_score + config.preamble_min_score_ratio * (peak_score - median_score)
+    # Estimate noise floor from the lower half of scores -- signal peaks and
+    # their sidelobes live in the upper half, so this gives a clean noise
+    # estimate even for signal-rich buffers.
+    overall_median = float(np.median(scores))
+    lower_half = scores[scores <= overall_median]
+    if lower_half.size < 4:
+        return []
+    noise_centre = float(np.median(lower_half))
+    noise_mad = float(np.median(np.abs(lower_half - noise_centre)))
+    # MAD -> gaussian sigma. The 2.0x factor is because we're computing MAD on
+    # a half-distribution (values <= median), which underestimates true σ.
+    noise_sigma = max(2.0 * 1.4826 * noise_mad, 1e-9)
+
+    if peak_score < noise_centre + 6.0 * noise_sigma:
+        return []
+
+    threshold = peak_score * _PREAMBLE_SCORE_RATIO
 
     peaks: list[int] = []
     guard = preamble_length
