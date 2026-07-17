@@ -164,7 +164,6 @@ Modem-layer flags (all prefixed `--modem-*`, feed into `ModemConfig`):
 | `--modem-no-rs-crc` | CRC on | Strip the 4-byte payload CRC that RS uses to reject bogus decodes. |
 | `--modem-sync-every-blocks N` | `4` | Preamble inserted every N data blocks. Smaller N = faster re-sync at low SNR, more overhead. |
 | `--modem-block-repeats N` | `1` | Each block transmitted N times, round-robin. RX sums soft LLRs. ~2 dB per doubling in AWGN + burst-fade diversity. |
-| `--modem-coarse-freq-search-hz N` | `0` | RX-only: enable FFT-based coarse LO-offset search up to ±N Hz. |
 
 I/O flags (plain names):
 

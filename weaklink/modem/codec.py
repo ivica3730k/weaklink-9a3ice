@@ -81,7 +81,10 @@ class ModemConfig:
     Viterbi+RS. Gives ~3 dB per doubling in AWGN; time-diversity across
     ``sync_every_blocks`` positions helps against burst fades too.
     """
-    coarse_frequency_search_hz: float = 0.0
+    coarse_frequency_search_hz: float = 500.0
+    """Half-range in Hz for FFT-based coarse LO-offset search before preamble
+    sync. Always on by default -- costs ~50 ms per decode and handles typical
+    HF LO / dial drift up to a few hundred Hz."""
     frequency_search_hz: float = 20.0
     frequency_resolution_hz: float = 1.0
     preamble_min_score_ratio: float = 0.7

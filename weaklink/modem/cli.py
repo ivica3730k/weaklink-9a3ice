@@ -73,14 +73,6 @@ def _build_parser() -> argparse.ArgumentParser:
 
     rx_parser = subparsers.add_parser("rx")
     _add_modem_args(rx_parser)
-    rx_modem_extra = rx_parser.add_argument_group("modem (rx-only)")
-    rx_modem_extra.add_argument(
-        "--modem-coarse-freq-search-hz",
-        type=float,
-        default=0.0,
-        dest="modem_coarse_freq_search_hz",
-        help="FFT-based coarse LO-offset search up to +/-N Hz. 0 disables.",
-    )
     io_rx = rx_parser.add_argument_group("io", "input / output")
     io_rx.add_argument("--output", type=Path, help="Output file (default: stdout).")
     io_rx.add_argument("--wav", type=Path, help="Read from a WAV file instead of recording from the audio device.")
@@ -95,7 +87,6 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _make_config(args: argparse.Namespace) -> ModemConfig:
     tone_spacing = args.modem_tone_spacing if args.modem_tone_spacing is not None else args.modem_baud
-    coarse = getattr(args, "modem_coarse_freq_search_hz", 0.0)
     return ModemConfig(
         waveform=WaveformConfig(
             baud=args.modem_baud,
@@ -107,7 +98,6 @@ def _make_config(args: argparse.Namespace) -> ModemConfig:
         rs_crc_enabled=args.modem_rs_crc_enabled,
         sync_every_blocks=args.modem_sync_every_blocks,
         block_repeats=args.modem_block_repeats,
-        coarse_frequency_search_hz=coarse,
     )
 
 
