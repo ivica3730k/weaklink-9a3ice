@@ -377,7 +377,10 @@ def estimate_snr_db(magnitudes: np.ndarray) -> float:
     losers_avg = (magnitudes.sum(axis=1) - winner) / (magnitudes.shape[1] - 1)
     losers_avg = np.maximum(losers_avg, 1e-12)
     ratios = winner / losers_avg
-    return float(10.0 * np.log10(np.mean(ratios)))
+    mean_ratio = float(np.mean(ratios))
+    if mean_ratio <= 0.0:
+        return 0.0
+    return float(10.0 * np.log10(mean_ratio))
 
 
 def _decode_one_block_from_soft(
