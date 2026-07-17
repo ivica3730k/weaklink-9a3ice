@@ -10,10 +10,10 @@ that measured best in the AWGN benchmark. Any explicit ``--modem-*`` flag
 overrides the preset. Off-preset baud rates fall back to the 300-baud
 preset with a stderr warning.
 
-    echo -n "hello over air" | weaklink-modem tx --modem-wav out.wav
-    cat message.txt         | weaklink-modem tx                     # live TX
-    weaklink-modem rx --modem-wav out.wav > received.bin
-    weaklink-modem rx                                                # live RX, Ctrl-C to stop
+    echo -n "hello over air" | weaklink-9a3ice tx --modem-wav out.wav
+    cat message.txt         | weaklink-9a3ice tx                     # live TX
+    weaklink-9a3ice rx --modem-wav out.wav > received.bin
+    weaklink-9a3ice rx                                                # live RX, Ctrl-C to stop
 """
 
 from __future__ import annotations
@@ -101,7 +101,7 @@ def _add_modem_args(sub: argparse.ArgumentParser) -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="weaklink-modem", description="Streaming 4-FSK modem.")
+    parser = argparse.ArgumentParser(prog="weaklink-9a3ice", description="Streaming 4-FSK modem.")
     subparsers = parser.add_subparsers(dest="direction", required=True)
     tx_parser = subparsers.add_parser("tx", help="Encode stdin bytes and transmit (or write to WAV).")
     _add_modem_args(tx_parser)
@@ -115,7 +115,7 @@ def _pick_preset(baud: float) -> dict[str, int]:
     if baud in BAUD_PRESETS:
         return BAUD_PRESETS[baud]
     print(
-        f"weaklink-modem: warning: baud {baud} is not in the tested preset set "
+        f"weaklink-9a3ice: warning: baud {baud} is not in the tested preset set "
         f"{sorted(BAUD_PRESETS.keys())!s}; falling back to the {FALLBACK_PRESET_BAUD:g}-baud "
         f"preset. Override any modem knob explicitly to silence this.",
         file=sys.stderr,

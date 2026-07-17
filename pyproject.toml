@@ -22,7 +22,7 @@ pylint = "^4.0.5"
 setuptools = "82.0.1"
 
 [tool.poetry.scripts]
-weaklink-modem = "weaklink.modem.cli:main"
+weaklink-9a3ice = "weaklink.modem.cli:main"
 weaklink-benchmark = "weaklink.benchmark:main"
 
 [build-system]
