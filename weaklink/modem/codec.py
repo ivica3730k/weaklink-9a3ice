@@ -197,28 +197,64 @@ def encode(input_bytes: bytes, config: ModemConfig) -> np.ndarray:
 
 
 def decode(samples: np.ndarray, config: ModemConfig) -> bytes:
-    """Decode an audio stream to bytes. Missing/undecodable blocks are dropped."""
-    magnitudes = demodulate_soft(samples, config.waveform)
-    if magnitudes.shape[0] == 0:
-        return b""
+    """Decode an audio stream to bytes. Missing/undecodable blocks are dropped.
 
-    # Optional coarse frequency offset (FFT-based) for big SSB LO drift.
+    Frequency-offset tracking is per-preamble: after the global coarse search,
+    each detected sync marker gets its own fine-offset estimate, and the data
+    group that follows is demodulated using that per-group offset. This tracks
+    slow LO drift and satellite Doppler across long transmissions without any
+    external AFC.
+    """
+    if len(samples) == 0:
+        return b""
+    samples_per_symbol = config.waveform.samples_per_symbol
+
+    # 1. Global coarse offset (FFT-based, handles big SSB LO drift).
+    coarse_offset = 0.0
     if config.coarse_frequency_search_hz > 0.0:
         coarse_offset = estimate_coarse_frequency_offset(
             np.asarray(samples, dtype=np.float64),
             config.waveform,
             search_range_hz=config.coarse_frequency_search_hz,
         )
-        if coarse_offset != 0.0:
-            magnitudes = demodulate_soft(samples, config.waveform, frequency_offset_hz=coarse_offset)
+
+    # 2. Demodulate once with the coarse offset just to find preambles.
+    coarse_magnitudes = demodulate_soft(samples, config.waveform, frequency_offset_hz=coarse_offset)
+    if coarse_magnitudes.shape[0] == 0:
+        return b""
 
     preamble = preamble_symbols()
-    peaks = _find_preamble_peaks(magnitudes, preamble, config)
+    peaks = _find_preamble_peaks(coarse_magnitudes, preamble, config)
     if not peaks:
         return b""
-    # Treat end-of-signal as an implicit trailing sync boundary so the last
-    # group is decoded even if its trailing preamble was corrupted.
-    peaks_with_end = peaks + [magnitudes.shape[0]]
+
+    # 3. Per-preamble fine offset. Each peak gets its own estimate so slow
+    # drift across the transmission is tracked marker by marker.
+    per_peak_offsets: list[float] = []
+    for peak in peaks:
+        preamble_sample_start = peak * samples_per_symbol
+        preamble_sample_end = preamble_sample_start + len(preamble) * samples_per_symbol
+        if preamble_sample_end > len(samples):
+            per_peak_offsets.append(coarse_offset)
+            continue
+        preamble_samples = np.asarray(samples[preamble_sample_start:preamble_sample_end], dtype=np.float64)
+        if config.frequency_search_hz > 0.0:
+            offset = estimate_frequency_offset(
+                preamble_samples,
+                config.waveform,
+                preamble,
+                search_range_hz=config.frequency_search_hz,
+                resolution_hz=config.frequency_resolution_hz,
+                prior_offset_hz=coarse_offset,
+            )
+        else:
+            offset = coarse_offset
+        per_peak_offsets.append(offset)
+
+    # 4. For each group, demodulate that region with the per-group offset if
+    # it drifted significantly from the coarse baseline; otherwise reuse the
+    # already-computed coarse magnitudes.
+    peaks_with_end = peaks + [coarse_magnitudes.shape[0]]
 
     codec = config.rs_codec()
     block_length = _block_symbol_length(config)
@@ -231,18 +267,32 @@ def decode(samples: np.ndarray, config: ModemConfig) -> bytes:
         transmitted_blocks = span // block_length
         if transmitted_blocks == 0:
             continue
-        # Round-robin: M logical blocks repeated R times. transmitted = M*R.
         num_data_blocks = transmitted_blocks // repeats
         if num_data_blocks == 0:
             continue
+
+        group_offset = per_peak_offsets[peak_index]
+        if abs(group_offset - coarse_offset) > 0.5:
+            # Re-demodulate just this group's samples with the drifted offset.
+            group_samples_start = group_start * samples_per_symbol
+            group_samples_end = min(group_end * samples_per_symbol, len(samples))
+            group_samples = samples[group_samples_start:group_samples_end]
+            group_magnitudes = demodulate_soft(
+                group_samples, config.waveform, frequency_offset_hz=group_offset
+            )
+            base_offset_in_group = 0
+        else:
+            group_magnitudes = coarse_magnitudes
+            base_offset_in_group = group_start
+
         for block_index in range(num_data_blocks):
-            # Sum LLRs across copies rather than magnitudes -- max-log-MAP is
-            # non-linear, so per-copy LLR extraction then summation is
-            # noticeably better at low SNR than averaging magnitudes first.
+            # Sum LLRs across copies rather than magnitudes; max-log-MAP is
+            # non-linear, so per-copy LLR extraction then summation gets more
+            # of the theoretical combining gain at low SNR.
             combined_soft: np.ndarray | None = None
             for copy_index in range(repeats):
-                copy_position = group_start + (copy_index * num_data_blocks + block_index) * block_length
-                copy_mags = magnitudes[copy_position : copy_position + block_length]
+                copy_position = base_offset_in_group + (copy_index * num_data_blocks + block_index) * block_length
+                copy_mags = group_magnitudes[copy_position : copy_position + block_length]
                 copy_soft = soft_bits_from_magnitudes(copy_mags)
                 if combined_soft is None:
                     combined_soft = copy_soft.copy()
