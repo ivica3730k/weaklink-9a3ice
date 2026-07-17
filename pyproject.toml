@@ -1,13 +1,16 @@
 [tool.poetry]
-name = "minimodem-rs"
+name = "weaklink-9a3ice"
 version = "0.0.0"
-description = "Reed-Solomon framing wrapper around the minimodem CLI, with tx/rx subcommands and full minimodem option passthrough."
+description = "4-FSK streaming modem for HF SSB and wider channels: Reed-Solomon framing, soft Viterbi, round-robin block repetition, byte-pipe semantics."
 authors = ["Ivica"]
-packages = [{ include = "minimodem_rs" }]
+packages = [{ include = "weaklink" }]
 
 [tool.poetry.dependencies]
 python = "^3.10"
 reedsolo = "^1.7.0"
+numpy = "^2.0"
+soundfile = "^0.12"
+sounddevice = "^0.5"
 
 [tool.poetry.group.dev.dependencies]
 black = "26.3.1"
@@ -19,7 +22,8 @@ pylint = "^4.0.5"
 setuptools = "82.0.1"
 
 [tool.poetry.scripts]
-minimodem-rs = "minimodem_rs.main:main"
+weaklink-modem = "weaklink.modem.cli:main"
+weaklink-benchmark = "weaklink.benchmark:main"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
@@ -45,9 +49,14 @@ line_length = 120
 multi_line_output = 3
 include_trailing_comma = true
 
+[tool.pytest.ini_options]
+markers = [
+    "slow: SNR-sweep integration tests; run explicitly with `-m slow`",
+]
+
 [tool.mypy]
 python_version = "3.10"
-files = ["minimodem_rs", "tests"]
+files = ["weaklink", "tests_weaklink"]
 ignore_missing_imports = true
 check_untyped_defs = true
 warn_redundant_casts = true
