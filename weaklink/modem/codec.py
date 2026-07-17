@@ -441,7 +441,22 @@ def _decode_one_block_from_soft(
 def _find_preamble_peaks(
     magnitudes: np.ndarray, preamble: np.ndarray, config: ModemConfig
 ) -> list[int]:
-    """Return preamble positions above threshold with non-max suppression."""
+    """Return preamble positions with a robust, MAD-based threshold.
+
+    The old ``threshold = 0.7 * max(scores)`` masked real preambles whenever a
+    single spurious high-scoring position (buffer edge transient, narrowband
+    interferer) landed above them. We now measure noise floor via the median +
+    MAD of the score distribution -- these are dominated by the many
+    noise-only offsets and are essentially blind to a handful of real-preamble
+    outliers.
+
+    Rules:
+      * If no offset scores enough sigmas above the noise floor, return [].
+        Real preambles land many sigmas above; noise-only buffers land nowhere.
+      * Otherwise, keep every offset above ``median + ratio * (peak - median)``,
+        i.e. the same "70 % of the way from noise floor to peak" idea, but
+        computed against the noise floor rather than zero.
+    """
     preamble_length = len(preamble)
     if magnitudes.shape[0] < preamble_length:
         return []
@@ -457,10 +472,24 @@ def _find_preamble_peaks(
 
     if scores.size == 0:
         return []
+
+    median_score = float(np.median(scores))
+    mad = float(np.median(np.abs(scores - median_score)))
+    # MAD -> gaussian sigma conversion. Small floor keeps this defined when
+    # MAD collapses to zero on degenerate inputs.
+    sigma = max(1.4826 * mad, 1e-9)
     peak_score = float(scores.max())
+
+    # Require the peak to sit clearly above the noise-only distribution. 6 σ
+    # gives a false-alarm rate of ~2 * 10^-9 per offset before FEC -- with
+    # ~50k offsets in a 60 s buffer at 300 baud we still expect << 1 false
+    # peak per RX session on pure noise.
+    if (peak_score - median_score) < 6.0 * sigma:
+        return []
     if peak_score <= 0.0:
         return []
-    threshold = peak_score * config.preamble_min_score_ratio
+
+    threshold = median_score + config.preamble_min_score_ratio * (peak_score - median_score)
 
     peaks: list[int] = []
     guard = preamble_length
