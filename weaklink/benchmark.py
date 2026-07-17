@@ -147,6 +147,18 @@ def _enumerate_configs() -> list[Config]:
                         block_repeats=block_repeats,
                     )
                 )
+    # Notable single-config rows below the main grid.
+    for block_repeats in (1, 2, 4):
+        configs.append(
+            Config(
+                baud=9,
+                rs_data=16,
+                rs_parity=8,
+                block_repeats=block_repeats,
+                payload_bytes=20,
+                note=f"9 baud floor, 20-byte payload, {block_repeats}x repeat",
+            )
+        )
     return configs
 
 

@@ -205,6 +205,9 @@ Streaming modem. Payload: 100 random-ASCII bytes. Sync every 4 data blocks. Refe
 | 1200 | RS(164,128) | 1&times; | 100 chars in 1.2 s | 652.2 bit/s | **+3 dB** | -7.9 dB | 10.9 dB |
 | 1200 | RS(164,128) | 2&times; | 100 chars in 2.4 s | 333.3 bit/s | **+5 dB** | -11.0 dB | 16.0 dB |
 | 1200 | RS(164,128) | 4&times; | 100 chars in 4.7 s | 168.5 bit/s | **+3 dB** | -14.0 dB | 17.0 dB |
+| 9 | RS(28,16) | 1&times; | 20 chars in 64.0 s<br/><sub>9 baud floor, 20-byte payload, 1x repeat</sub> | 2.5 bit/s | **-19 dB** | -32.4 dB | 13.4 dB |
+| 9 | RS(28,16) | 2&times; | 20 chars in 120.9 s<br/><sub>9 baud floor, 20-byte payload, 2x repeat</sub> | 1.3 bit/s | **-20 dB** | -35.1 dB | 15.1 dB |
+| 9 | RS(28,16) | 4&times; | 20 chars in 234.7 s<br/><sub>9 baud floor, 20-byte payload, 4x repeat</sub> | 0.7 bit/s | **-19 dB** | -38.0 dB | 19.0 dB |
 
 <!-- BENCHMARK RESULTS END -->
 
