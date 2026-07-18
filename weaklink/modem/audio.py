@@ -159,13 +159,10 @@ def _play_pulse(samples: np.ndarray, sample_rate: int, sink_name: str) -> None:
         stdin=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    assert proc.stdin is not None
-    try:
-        proc.stdin.write(samples.tobytes())
-        proc.stdin.close()
-    except BrokenPipeError:
-        pass
-    _, err = proc.communicate()
+    # Let communicate() handle stdin write + close + stderr read + wait as one
+    # atomic step; manual close before communicate() double-closes stdin and
+    # raises ValueError on Python 3.12.
+    _, err = proc.communicate(input=samples.tobytes())
     if proc.returncode != 0:
         raise RuntimeError(f"paplay exited {proc.returncode}: {err.decode(errors='replace')}")
 

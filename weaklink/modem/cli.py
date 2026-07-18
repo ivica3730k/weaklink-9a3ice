@@ -186,7 +186,23 @@ def _make_config(args: argparse.Namespace) -> ModemConfig:
     )
 
 
+#: Pilot tone padded around the modem signal on live tx paths. Silence
+#: doesn't wake up an IDLE PipeWire / PulseAudio sink -- the sink stays
+#: parked and the first ~100 ms of the actual modem signal gets clipped on
+#: the way in. Playing an actual sinusoid forces the sink into RUNNING
+#: before the preamble arrives. Trailing pilot keeps the sink alive so the
+#: last modem chunk gets flushed too.
+#:
+#: 1500 Hz sits between all four preset tone stacks (below 45-baud lowest
+#: at 1200 Hz, above 300-baud lowest at 1050 Hz) so the pilot won't be
+#: mistaken for a modem tone by the correlator during buffer trimming.
+_LIVE_TX_PILOT_SECONDS: float = 0.2
+_LIVE_TX_PILOT_HZ: float = 1500.0
+
+
 def _run_tx(args: argparse.Namespace) -> int:
+    import numpy as np
+
     config = _make_config(args)
     payload = sys.stdin.buffer.read()
     samples = encode(payload, config)
@@ -197,7 +213,13 @@ def _run_tx(args: argparse.Namespace) -> int:
     else:
         from weaklink.modem.audio import play
 
-        play(samples, config.waveform.sample_rate, device=args.modem_audio_output)
+        sample_rate = config.waveform.sample_rate
+        pilot_frames = int(round(_LIVE_TX_PILOT_SECONDS * sample_rate))
+        t = np.arange(pilot_frames) / sample_rate
+        # Match the modem amplitude so the pilot doesn't spike vs the signal.
+        pilot = (config.waveform.amplitude * np.sin(2 * np.pi * _LIVE_TX_PILOT_HZ * t)).astype(np.float32)
+        padded = np.concatenate([pilot, samples, pilot])
+        play(padded, sample_rate, device=args.modem_audio_output)
     return 0
 
 
