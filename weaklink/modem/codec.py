@@ -2,17 +2,19 @@
 
 Wire format::
 
-    [PREAMBLE] [data]...[data]   } sync_every_blocks per group, repeat
-    [PREAMBLE] [data]...[data]
-    [PREAMBLE]                     trailing marker
+    [PREAMBLE] [slot] [PREAMBLE] [slot] ... [PREAMBLE] [slot] [PREAMBLE]
 
-Data block: RS(N,K)+CRC -> K=7 rate-1/2 conv -> interleave -> 4-FSK.
-No length header; missing blocks silently dropped.
+Every slot carries one RS-encoded block. Data area is
+``[length][block_index][payload...][zero_pad]`` (1-byte length header
+strips trailing NUL; 1-byte index picks the output position and lets
+duplicate copies dedupe). Slot: RS(N,K)+CRC -> K=7 rate-1/2 conv ->
+interleave -> 4-FSK. Preamble between every slot (13% overhead) so any
+slot decodes standalone; message boundaries are inferred from
+non-block-length spans between adjacent preambles.
 """
 
 from __future__ import annotations
 
-import functools
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -98,29 +100,6 @@ class ModemConfig:
         return _block_symbol_length(self)
 
 
-#: Seed for per-copy symbol permutations; shared between TX and RX so both
-#: sides know how to un-scramble each retransmit before LLR combining.
-_COPY_PERMUTATION_SEED: int = 0xC0DE
-
-
-@functools.lru_cache(maxsize=None)
-def _copy_permutation(copy_index: int, size: int) -> np.ndarray:
-    """Deterministic permutation of ``size`` symbol positions for the
-    ``copy_index``-th retransmit. Copy 0 is identity; other copies use a
-    seeded PRNG so a burst at time slot X hits different coded bits in
-    each copy, giving bit-level diversity even for single-block payloads."""
-    if copy_index == 0:
-        return np.arange(size, dtype=np.int64)
-    rng = np.random.default_rng(_COPY_PERMUTATION_SEED + copy_index)
-    return rng.permutation(size)
-
-
-@functools.lru_cache(maxsize=None)
-def _copy_permutation_inverse(copy_index: int, size: int) -> np.ndarray:
-    """Inverse of :func:`_copy_permutation` -- cached so RX doesn't re-argsort per block."""
-    return np.argsort(_copy_permutation(copy_index, size))
-
-
 def _pad_zeros(
     magnitudes: np.ndarray,
     samples: np.ndarray,
@@ -159,47 +138,41 @@ def _encode_one_block(payload: bytes, config: ModemConfig) -> np.ndarray:
 def encode(input_bytes: bytes, config: ModemConfig) -> np.ndarray:
     """Encode bytes to float32 audio.
 
-    Each block carries ``[length_byte, payload..., zero_pad]`` inside the
-    RS data area, so the receiver knows exactly how many bytes are real
-    payload and how many are padding. Length byte counts real payload
-    within the block (0 .. data_bytes-1).
+    Wire layout: ``[pre][slot 0][pre][slot 1][pre] ... [slot N-1][pre]``.
+    Each slot carries one RS-encoded block whose data area is
+    ``[length, block_index, payload..., zero_pad]``. RX decodes each
+    slot independently; block_index picks the right output position and
+    lets duplicate copies dedupe. Any single copy that clears CRC is
+    enough to recover a block.
     """
     codec = config.rs_codec()
     data_bytes = codec.config.data_bytes
-    if data_bytes < 2:
-        raise ValueError("rs_data_bytes must be >= 2 (1 header byte + 1 payload byte)")
+    if data_bytes < 3:
+        raise ValueError("rs_data_bytes must be >= 3 (length + block_index + 1 payload byte)")
     if data_bytes > 256:
         raise ValueError("rs_data_bytes must be <= 256 for a single-byte length header")
 
-    payload_per_block = data_bytes - 1
+    payload_per_block = data_bytes - 2  # length + block_index
     block_payloads: list[bytes] = []
     for start in range(0, max(len(input_bytes), 1), payload_per_block):
         chunk = input_bytes[start : start + payload_per_block]
-        header = bytes([len(chunk)])
-        block_payloads.append(header + chunk + b"\x00" * (payload_per_block - len(chunk)))
-    if not block_payloads:  # zero-length input still gets one empty block
-        block_payloads = [bytes([0]) + b"\x00" * payload_per_block]
+        block_payloads.append(chunk)
+    if not block_payloads:
+        block_payloads = [b""]
+    if len(block_payloads) > 256:
+        raise ValueError("payload too large: >256 blocks, single-byte block_index cannot address them")
 
     pre = PREAMBLE_SYMBOLS
-    group_size = config.sync_every_blocks
-    repeats = config.block_repeats
     symbol_pieces: list[np.ndarray] = []
-    for group_start in range(0, len(block_payloads), group_size):
-        group_end = min(group_start + group_size, len(block_payloads))
-        group_symbols = [
-            _encode_one_block(block_payloads[i], config)
-            for i in range(group_start, group_end)
-        ]
-        block_len = group_symbols[0].shape[0]
-        symbol_pieces.append(pre)
-        # Each copy uses a distinct symbol permutation; RX un-permutes
-        # before LLR combining. Bursts that hit the same time slot in
-        # multiple copies now corrupt different coded bits in each,
-        # so per-bit combining still recovers.
-        for copy_index in range(repeats):
-            perm = _copy_permutation(copy_index, block_len)
-            for block_syms in group_symbols:
-                symbol_pieces.append(block_syms[perm])
+    for _copy in range(config.block_repeats):
+        for block_index, chunk in enumerate(block_payloads):
+            framed = (
+                bytes([len(chunk), block_index])
+                + chunk
+                + b"\x00" * (payload_per_block - len(chunk))
+            )
+            symbol_pieces.append(pre)
+            symbol_pieces.append(_encode_one_block(framed, config))
     symbol_pieces.append(pre)  # trailing marker
     all_symbols = np.concatenate(symbol_pieces) if symbol_pieces else np.zeros(0, dtype=np.int8)
     return modulate(all_symbols, config.waveform)
@@ -261,18 +234,12 @@ def decode(samples: np.ndarray, config: ModemConfig, *, streaming: bool = False)
         _log.debug("no preambles above threshold")
         return (b"", 0) if streaming else b""
     if streaming and len(peaks) < 2:
-        # Keep the lone preamble as anchor for next call, unless enough
-        # audio has passed that the trailing one should already have
-        # arrived -- then it's stale (truncated tx or false peak), skip it.
-        preamble_length = len(preamble)
-        max_group_symbols = config.sync_every_blocks * _block_symbol_length(config) + preamble_length
-        symbols_past_preamble = coarse_magnitudes.shape[0] - peaks[0]
-        if symbols_past_preamble > 2 * max_group_symbols:
-            _log.debug(
-                "single preamble at %d is stale (%d symbols past, threshold %d); dropping",
-                peaks[0], symbols_past_preamble, 2 * max_group_symbols,
-            )
-            return b"", (peaks[0] + preamble_length) * samples_per_symbol
+        # Need two preambles to bracket a slot. Keep the one we have as
+        # anchor; stale if it's been sitting past two block durations.
+        block_len = _block_symbol_length(config)
+        symbols_past = coarse_magnitudes.shape[0] - peaks[0]
+        if symbols_past > 2 * (block_len + len(preamble)):
+            return b"", (peaks[0] + len(preamble)) * samples_per_symbol
         return b"", peaks[0] * samples_per_symbol
 
     # 3. Per-preamble fine offset -- tracks drift marker by marker.
@@ -297,148 +264,109 @@ def decode(samples: np.ndarray, config: ModemConfig, *, streaming: bool = False)
             offset = coarse_offset
         per_peak_offsets.append(offset)
 
-    # 4. For each group, demodulate that region with the per-group offset if
-    # it drifted significantly from the coarse baseline; otherwise reuse the
-    # already-computed coarse magnitudes.
-    if streaming:
-        # Group is one preamble pair; tail after the last one may be
-        # incomplete, so leave it for the next call.
-        peaks_with_end = peaks
-    else:
-        # Virtual leading/trailing preambles one group's-worth from the
-        # nearest real peak recover head/tail chops. Zero-pad magnitudes +
-        # samples if the projection is outside the buffer; RS mops up.
-        # Pin virtual offsets to coarse so we skip re-demod (which would
-        # index un-padded samples with padded coords).
-        group_symbol_span = config.block_repeats * _block_symbol_length(config)
-        samples = np.asarray(samples)
-
-        # Virtual leading: pair before first_real. Pad head if it lands < 0.
-        if peaks[0] > len(preamble):
-            virtual_leading = peaks[0] - group_symbol_span - len(preamble)
-            if virtual_leading < 0:
-                coarse_magnitudes, samples = _pad_zeros(
-                    coarse_magnitudes, samples, samples_per_symbol,
-                    n_symbols=-virtual_leading, side="head",
-                )
-                peaks = [p + -virtual_leading for p in peaks]
-                virtual_leading = 0
-            per_peak_offsets = [coarse_offset] + per_peak_offsets
-            peaks = [virtual_leading] + peaks
-
-        # Virtual trailing: pair after last_real. Pad tail if past buffer end.
-        virtual_trailing = peaks[-1] + len(preamble) + group_symbol_span
-        if virtual_trailing > coarse_magnitudes.shape[0]:
-            coarse_magnitudes, samples = _pad_zeros(
-                coarse_magnitudes, samples, samples_per_symbol,
-                n_symbols=virtual_trailing - coarse_magnitudes.shape[0], side="tail",
-            )
-        per_peak_offsets = per_peak_offsets + [coarse_offset]
-        peaks = peaks + [virtual_trailing]
-
-        peaks_with_end = peaks + [coarse_magnitudes.shape[0]]
-
+    # 4. Every adjacent preamble pair brackets one slot = one RS block.
+    # A span of 0 between preambles is a message boundary (one tx's
+    # trailing preamble sitting right against the next tx's leading one)
+    # -- flush the assembled prefix and start a new message.
+    #
+    # For batch mode we also try to project a virtual leading preamble
+    # one slot's-worth before the first real one, and a virtual trailing
+    # one slot's-worth after the last real one. That recovers single-slot
+    # transmissions where the head or tail preamble was chopped off; the
+    # missing symbols get zero-padded and RS mops up.
     codec = config.rs_codec()
     block_length = _block_symbol_length(config)
-    repeats = config.block_repeats
     output = bytearray()
-    total_blocks_attempted = 0
-    total_blocks_decoded = 0
     total_rs_errors_corrected = 0
-    # Max legit group span = sync_every_blocks * block_repeats slots.
-    # Wider means the two preambles are from different transmissions with
-    # silence between -- skip so we don't Viterbi garbage into RS.
-    max_group_span_symbols = config.sync_every_blocks * repeats * block_length
-    for peak_index in range(len(peaks_with_end) - 1):
-        group_start = peaks_with_end[peak_index] + len(preamble)
-        group_end = peaks_with_end[peak_index + 1]
-        span = group_end - group_start
-        transmitted_blocks = span // block_length
-        if transmitted_blocks == 0:
-            continue
-        if span > max_group_span_symbols + block_length:
-            _log.debug(
-                "group %d skipped: span %d symbols exceeds max group %d (unrelated preambles)",
-                peak_index, span, max_group_span_symbols,
-            )
-            continue
-        num_data_blocks = transmitted_blocks // repeats
-        if num_data_blocks == 0:
-            continue
+    slot_attempted = 0
+    slot_decoded = 0
 
-        group_offset = per_peak_offsets[peak_index]
-        _log.debug(
-            "group %d: start_sym=%d, span_sym=%d, data_blocks=%d, fine_offset=%+.1f Hz",
-            peak_index, group_start, span, num_data_blocks, group_offset,
-        )
-        if abs(group_offset - coarse_offset) > 0.5:
-            # Re-demodulate just this group's samples with the drifted offset.
-            group_samples_start = group_start * samples_per_symbol
-            group_samples_end = min(group_end * samples_per_symbol, len(samples))
-            group_samples = samples[group_samples_start:group_samples_end]
-            group_magnitudes = demodulate_soft(
-                group_samples, config.waveform, frequency_offset_hz=group_offset
+    if not streaming:
+        samples = np.asarray(samples)
+        # Head padding: pretend a virtual leading preamble sits one
+        # slot's-worth before the first real one.
+        if peaks[0] > len(preamble):
+            virtual = peaks[0] - block_length - len(preamble)
+            if virtual < 0:
+                pad_symbols = -virtual
+                coarse_magnitudes, samples = _pad_zeros(
+                    coarse_magnitudes, samples, samples_per_symbol,
+                    n_symbols=pad_symbols, side="head",
+                )
+                peaks = [p + pad_symbols for p in peaks]
+                virtual = 0
+            per_peak_offsets = [coarse_offset] + per_peak_offsets
+            peaks = [virtual] + peaks
+        # Tail padding: virtual trailing preamble one slot's-worth after
+        # the last real one.
+        virtual_end = peaks[-1] + len(preamble) + block_length
+        if virtual_end > coarse_magnitudes.shape[0]:
+            coarse_magnitudes, samples = _pad_zeros(
+                coarse_magnitudes, samples, samples_per_symbol,
+                n_symbols=virtual_end - coarse_magnitudes.shape[0], side="tail",
             )
-            base_offset_in_group = 0
+        per_peak_offsets = per_peak_offsets + [coarse_offset]
+        peaks = peaks + [virtual_end]
+
+    def _flush_message(msg: dict[int, bytes]) -> None:
+        i = 0
+        while i in msg:
+            output.extend(msg[i])
+            i += 1
+
+    current_msg: dict[int, bytes] = {}
+    for slot_i in range(len(peaks) - 1):
+        slot_start = peaks[slot_i] + len(preamble)
+        slot_end = peaks[slot_i + 1]
+        span = slot_end - slot_start
+        # Within a message every span equals block_length exactly.
+        # Anything else -- adjacent preambles (boundary), pilot gap
+        # (boundary from another tx), truncated tail -- means the
+        # current message is done. Flush and skip.
+        if abs(span - block_length) > 4:
+            _log.debug("slot %d span %d != block_length; message boundary", slot_i, span)
+            _flush_message(current_msg)
+            current_msg = {}
+            continue
+        slot_attempted += 1
+        slot_offset = per_peak_offsets[slot_i]
+        if abs(slot_offset - coarse_offset) > 0.5:
+            sample_start = slot_start * samples_per_symbol
+            sample_end = min(slot_end * samples_per_symbol, len(samples))
+            slot_mags = demodulate_soft(
+                samples[sample_start:sample_end], config.waveform, frequency_offset_hz=slot_offset,
+            )[:block_length]
         else:
-            group_magnitudes = coarse_magnitudes
-            base_offset_in_group = group_start
+            slot_mags = coarse_magnitudes[slot_start : slot_start + block_length]
+        if slot_mags.shape[0] < block_length:
+            continue
+        soft = soft_bits_from_magnitudes(slot_mags)
+        decoded, errors_corrected = _decode_one_block_from_soft(soft, config, codec)
+        if decoded is None or len(decoded) < 2:
+            continue
+        length = decoded[0]
+        block_index = decoded[1]
+        payload_area_size = len(decoded) - 2
+        if length > payload_area_size:
+            length = payload_area_size
+        if block_index in current_msg:
+            continue  # duplicate copy
+        current_msg[block_index] = bytes(decoded[2 : 2 + length])
+        slot_decoded += 1
+        if errors_corrected > 0:
+            total_rs_errors_corrected += errors_corrected
 
-        group_decoded = 0
-        group_failed = 0
-        group_rs_errors = 0
-        for block_index in range(num_data_blocks):
-            total_blocks_attempted += 1
-            # Sum LLRs (not magnitudes) across copies: max-log-MAP is
-            # non-linear, so per-copy LLR + sum gets more combining gain.
-            combined_soft: np.ndarray | None = None
-            for copy_index in range(repeats):
-                copy_position = base_offset_in_group + (copy_index * num_data_blocks + block_index) * block_length
-                copy_mags = group_magnitudes[copy_position : copy_position + block_length]
-                # Un-permute this copy's symbols back to the original ordering
-                # before soft-bit extraction so all copies contribute LLRs at
-                # the same coded-bit position.
-                if copy_index > 0:
-                    copy_mags = copy_mags[_copy_permutation_inverse(copy_index, block_length)]
-                copy_soft = soft_bits_from_magnitudes(copy_mags)
-                if combined_soft is None:
-                    combined_soft = copy_soft.copy()
-                else:
-                    combined_soft += copy_soft
-            decoded, errors_corrected = _decode_one_block_from_soft(combined_soft, config, codec)
-            if decoded is not None:
-                # First byte is the block-local length header; next
-                # ``length`` bytes are real payload, rest is zero padding.
-                length = decoded[0] if decoded else 0
-                if length > len(decoded) - 1:
-                    length = len(decoded) - 1  # tolerate corrupt header
-                output.extend(decoded[1 : 1 + length])
-                group_decoded += 1
-                total_blocks_decoded += 1
-                if errors_corrected > 0:
-                    group_rs_errors += errors_corrected
-                    total_rs_errors_corrected += errors_corrected
-            else:
-                group_failed += 1
-        if group_rs_errors > 0:
-            _log.warning(
-                "RS corrected %d byte-symbol(s) across %d block(s) in group %d",
-                group_rs_errors, group_decoded, peak_index,
-            )
-        if group_failed > 0:
-            _log.error(
-                "RS failed on %d block(s) in group %d -- data lost",
-                group_failed, peak_index,
-            )
-        _log.debug("group %d: %d/%d blocks decoded", peak_index, group_decoded, num_data_blocks)
+    _flush_message(current_msg)
 
-    _log.debug(
-        "totals: %d/%d blocks decoded, %d bytes emitted, %d RS corrections",
-        total_blocks_decoded, total_blocks_attempted, len(output), total_rs_errors_corrected,
-    )
+    if total_rs_errors_corrected > 0:
+        _log.warning("RS corrected %d byte-symbol(s) total", total_rs_errors_corrected)
+    slot_failed = slot_attempted - slot_decoded
+    if slot_failed > 0:
+        _log.error("%d slot(s) failed CRC/RS -- copies elsewhere may recover", slot_failed)
+    _log.debug("slots: %d attempted, %d decoded; %d bytes emitted",
+               slot_attempted, slot_decoded, len(output))
+
     if streaming:
-        # Advance the cursor to the last real preamble so the next call keeps
-        # that preamble as the anchor for the group that follows.
         safe_cursor_samples = peaks[-1] * samples_per_symbol
         return bytes(output), safe_cursor_samples
     return bytes(output)

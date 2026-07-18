@@ -177,6 +177,13 @@ def _make_config(args: argparse.Namespace) -> ModemConfig:
 #: gives the coarse-offset FFT real 4-FSK tone energy to lock onto.
 _LIVE_TX_PILOT_MIN_SECONDS: float = 0.2
 
+#: Pilot each side must also be wider than the preamble in symbol space:
+#: back-to-back tx buffers need > 2 * preamble_length symbols of gap
+#: between their adjacent preambles, otherwise non-max suppression eats
+#: one of them (the correlator guard is preamble_length symbols). Matters
+#: at low baud where 0.2 s is only ~9 symbols.
+_LIVE_TX_PILOT_MIN_SYMBOLS: int = 40
+
 #: Floor on total live-tx duration. 1200-baud single-char is ~250 ms of
 #: signal -- too short to give RX two clean poll windows. Pad to 1 s.
 _LIVE_TX_MIN_SECONDS: float = 1.0
@@ -216,6 +223,7 @@ def _run_tx(args: argparse.Namespace) -> int:
         pilot_each_side = max(
             _LIVE_TX_PILOT_MIN_SECONDS,
             (_LIVE_TX_MIN_SECONDS - signal_seconds) / 2.0,
+            _LIVE_TX_PILOT_MIN_SYMBOLS / config.waveform.baud,
         )
         pilot = _pilot_signal(config, pilot_each_side).astype(np.float32)
         padded = np.concatenate([pilot, samples, pilot])

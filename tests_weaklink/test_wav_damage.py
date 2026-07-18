@@ -13,6 +13,7 @@ from weaklink.modem.cli import (
     BAUD_PRESETS,
     _LIVE_TX_MIN_SECONDS,
     _LIVE_TX_PILOT_MIN_SECONDS,
+    _LIVE_TX_PILOT_MIN_SYMBOLS,
     _pilot_signal,
 )
 from weaklink.modem.codec import ModemConfig, decode, encode
@@ -40,6 +41,7 @@ def _live_tx_buffer(baud: int, payload: bytes) -> tuple[np.ndarray, ModemConfig]
     pilot_each_side = max(
         _LIVE_TX_PILOT_MIN_SECONDS,
         (_LIVE_TX_MIN_SECONDS - signal_seconds) / 2.0,
+        _LIVE_TX_PILOT_MIN_SYMBOLS / config.waveform.baud,
     )
     pilot = _pilot_signal(config, pilot_each_side).astype(np.float32)
     return np.concatenate([pilot, samples, pilot]).astype(np.float32), config
