@@ -201,24 +201,19 @@ class LiveInputStream:
         return self
 
     def __exit__(self, *_exc: object) -> None:
+        # SIGKILL + walk away. The OS reaps the pipes and the pump thread's
+        # blocking read returns immediately once the fd closes. No waiting.
         self._stop_event.set()
         if self._sd_stream is not None:
-            self._sd_stream.close()
-        if self._proc is not None:
-            # Short timeouts: parec closes cleanly in ~50 ms in practice.
-            # SIGKILL fallback the moment SIGTERM doesn't take, so Ctrl-C
-            # returns to the shell without a perceptible hang.
             try:
-                self._proc.terminate()
-                self._proc.wait(timeout=0.2)
+                self._sd_stream.close()
             except Exception:
+                pass
+        if self._proc is not None:
+            try:
                 self._proc.kill()
-                try:
-                    self._proc.wait(timeout=0.2)
-                except Exception:
-                    pass
-        if self._thread is not None:
-            self._thread.join(timeout=0.2)
+            except Exception:
+                pass
 
     def _open_sounddevice(self) -> None:
         sd = _import_sounddevice()
