@@ -99,6 +99,22 @@ def preamble_symbols() -> np.ndarray:
     return np.asarray(_PREAMBLE_SYMBOLS, dtype=np.int8)
 
 
+def _pad_zeros(
+    magnitudes: np.ndarray,
+    samples: np.ndarray,
+    samples_per_symbol: int,
+    *,
+    n_symbols: int,
+    side: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Zero-pad magnitudes + samples on ``side`` ("head" or "tail")."""
+    pad_rows = np.zeros((n_symbols, magnitudes.shape[1]), dtype=magnitudes.dtype)
+    pad_samples = np.zeros(n_symbols * samples_per_symbol, dtype=samples.dtype)
+    if side == "head":
+        return np.vstack([pad_rows, magnitudes]), np.concatenate([pad_samples, samples])
+    return np.vstack([magnitudes, pad_rows]), np.concatenate([samples, pad_samples])
+
+
 def _block_symbol_length(config: ModemConfig) -> int:
     codec = config.rs_codec()
     info_bits = codec.config.block_size * 8
@@ -259,43 +275,29 @@ def decode(samples: np.ndarray, config: ModemConfig, *, streaming: bool = False)
         # samples if the projection is outside the buffer; RS mops up.
         # Pin virtual offsets to coarse so we skip re-demod (which would
         # index un-padded samples with padded coords).
-        block_length_symbols = _block_symbol_length(config)
-        group_symbol_span = config.block_repeats * block_length_symbols
+        group_symbol_span = config.block_repeats * _block_symbol_length(config)
+        samples = np.asarray(samples)
 
+        # Virtual leading: pair before first_real. Pad head if it lands < 0.
         if peaks[0] > len(preamble):
             virtual_leading = peaks[0] - group_symbol_span - len(preamble)
             if virtual_leading < 0:
-                pad_symbols = -virtual_leading
-                pad_rows = np.zeros(
-                    (pad_symbols, coarse_magnitudes.shape[1]),
-                    dtype=coarse_magnitudes.dtype,
+                coarse_magnitudes, samples = _pad_zeros(
+                    coarse_magnitudes, samples, samples_per_symbol,
+                    n_symbols=-virtual_leading, side="head",
                 )
-                coarse_magnitudes = np.vstack([pad_rows, coarse_magnitudes])
-                pad_samples_head = np.zeros(
-                    pad_symbols * samples_per_symbol, dtype=np.asarray(samples).dtype
-                )
-                samples = np.concatenate([pad_samples_head, np.asarray(samples)])
-                peaks = [p + pad_symbols for p in peaks]
+                peaks = [p + -virtual_leading for p in peaks]
                 virtual_leading = 0
             per_peak_offsets = [coarse_offset] + per_peak_offsets
             peaks = [virtual_leading] + peaks
 
-        # Virtual trailing: project one group's-worth after the last real
-        # peak. If it would land past the current end of the magnitude
-        # buffer, pad the tail with zeros the same way as the head.
+        # Virtual trailing: pair after last_real. Pad tail if past buffer end.
         virtual_trailing = peaks[-1] + len(preamble) + group_symbol_span
-        buffer_end = coarse_magnitudes.shape[0]
-        if virtual_trailing > buffer_end:
-            pad_symbols = virtual_trailing - buffer_end
-            pad_rows = np.zeros(
-                (pad_symbols, coarse_magnitudes.shape[1]),
-                dtype=coarse_magnitudes.dtype,
+        if virtual_trailing > coarse_magnitudes.shape[0]:
+            coarse_magnitudes, samples = _pad_zeros(
+                coarse_magnitudes, samples, samples_per_symbol,
+                n_symbols=virtual_trailing - coarse_magnitudes.shape[0], side="tail",
             )
-            coarse_magnitudes = np.vstack([coarse_magnitudes, pad_rows])
-            pad_samples_tail = np.zeros(
-                pad_symbols * samples_per_symbol, dtype=np.asarray(samples).dtype
-            )
-            samples = np.concatenate([np.asarray(samples), pad_samples_tail])
         per_peak_offsets = per_peak_offsets + [coarse_offset]
         peaks = peaks + [virtual_trailing]
 
