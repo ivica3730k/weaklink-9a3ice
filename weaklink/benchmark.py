@@ -35,7 +35,7 @@ PAYLOAD_BYTES: int = 100
 PAYLOAD_SEED: int = 0
 BAUDS: tuple[int, ...] = (45, 100, 300, 1200)
 RS_CONFIGS: tuple[tuple[int, int], ...] = ((16, 8), (32, 8), (128, 32))
-BLOCK_REPEATS: tuple[int, ...] = (1, 2, 4)
+BLOCK_REPEATS: tuple[int, ...] = (1, 2, 4, 8)
 SYNC_EVERY_FIXED: int = 4
 
 
@@ -148,7 +148,7 @@ def _enumerate_configs() -> list[Config]:
                     )
                 )
     # Notable single-config rows below the main grid.
-    for block_repeats in (1, 2, 4):
+    for block_repeats in (1, 2, 4, 8):
         configs.append(
             Config(
                 baud=9,
