@@ -283,9 +283,25 @@ def _live_stream_decode(config: ModemConfig, *, audio_input: str | None = None) 
     samples_before_buffer = 0
     cursor = 0
 
-    # Cap the retained audio at 60 s. Prevents unbounded memory growth on long
-    # rx sessions, and bounds the per-poll decode cost.
-    MAX_WINDOW_SAMPLES = 60 * sample_rate
+    # Buffer cap. Must hold the full worst-case group (preamble + all data
+    # blocks in one sync group at ``block_repeats`` copies) plus enough head
+    # room to cover buffer trimming latency. Scales with baud: at 9 baud a
+    # single-block payload's group is ~50 s, so a fixed 60 s cap would drop
+    # the leading preamble before the trailing one arrives, silently making
+    # 9 baud impossible to decode live. Minimum floor of 60 s so short-
+    # payload / fast-baud paths still have some slack.
+    from weaklink.modem.codec import _block_symbol_length  # noqa: WPS433
+
+    _max_group_symbols = (
+        config.sync_every_blocks * _block_symbol_length(config) * config.block_repeats
+        + 32  # preamble length
+    )
+    _max_group_seconds = _max_group_symbols / config.waveform.baud
+    MAX_WINDOW_SAMPLES = int(max(60.0, 3.0 * _max_group_seconds) * sample_rate)
+    _log.debug(
+        "live rx buffer cap: %.1f s (%.1f s per group)",
+        MAX_WINDOW_SAMPLES / sample_rate, _max_group_seconds,
+    )
 
     def _callback(indata_1d: np.ndarray) -> None:
         chunks.append(indata_1d)
@@ -300,9 +316,13 @@ def _live_stream_decode(config: ModemConfig, *, audio_input: str | None = None) 
         if not chunks:
             return
         total_samples_seen = _total_buffered()
-        # Ensure we don't work with less than a few seconds of audio -- the
-        # decoder needs at least two preambles for a streaming decode.
-        if total_samples_seen - cursor < 2 * sample_rate:
+        # Enough audio to fit *one* preamble plus a data-block worth of head
+        # room -- we start attempting decodes as soon as the leading preamble
+        # could plausibly be present. Retries every poll as buffer grows, so
+        # over-eager attempts are cheap.
+        preamble_seconds = 32 / config.waveform.baud
+        min_wait_samples = int(max(2.0, preamble_seconds + 1.0) * sample_rate)
+        if total_samples_seen - cursor < min_wait_samples:
             return
         # Concatenate current chunks. Slice to start at the cursor.
         buffer = np.concatenate(chunks).reshape(-1)
