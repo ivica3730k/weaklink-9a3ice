@@ -26,13 +26,6 @@ class BlockConfig:
         crc_size = CRC_BYTES if self.crc_enabled else 0
         return self.data_bytes + crc_size + self.parity_bytes
 
-    @property
-    def rs_message_size(self) -> int:
-        """The size of the RS message (data + optional CRC) before parity."""
-        crc_size = CRC_BYTES if self.crc_enabled else 0
-        return self.data_bytes + crc_size
-
-
 class RSBlockCodec:
     def __init__(self, config: BlockConfig):
         self.config = config

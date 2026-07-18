@@ -118,18 +118,6 @@ def _encode_one_block(payload: bytes, config: ModemConfig) -> np.ndarray:
     return bits_to_symbols(padded)
 
 
-def _decode_one_block(magnitudes: np.ndarray, config: ModemConfig, codec: RSBlockCodec) -> bytes | None:
-    """Given demodulated magnitudes for exactly one block, run the pipeline in reverse."""
-    if magnitudes.shape[0] != config.block_symbol_length:
-        return None
-    soft_bits = soft_bits_from_magnitudes(magnitudes)
-    coded_bits_count = 2 * (codec.config.block_size * 8 + fec.CONSTRAINT_LENGTH - 1)
-    deinterleaved = deinterleave_soft(soft_bits, config.interleaver, coded_bits_count)
-    payload_bits = fec.decode(deinterleaved, num_output_bits=codec.config.block_size * 8)
-    wire_bytes = _bits_to_bytes_msb(payload_bits)
-    return codec.try_decode(wire_bytes)
-
-
 def encode(input_bytes: bytes, config: ModemConfig) -> np.ndarray:
     """Encode bytes to float32 audio. Zero-pads to RS-block boundary.
 
