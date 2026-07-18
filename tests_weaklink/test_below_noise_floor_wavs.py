@@ -19,12 +19,18 @@ from weaklink.modem.waveform import WaveformConfig
 
 EXPECTED_PAYLOAD = b"weaklink below-noise-floor test payload"
 
-# (baud, filename, default-preset kwargs matching weaklink.modem.cli.BAUD_PRESETS)
+# (baud, filename, config kwargs matching weaklink.modem.cli.BAUD_PRESETS for
+# that baud, plus block_repeats override for the "deep" variants)
 BELOW_NOISE_CASES = [
-    (9,    "below_noise_9baud_snr-27dB.wav",    dict(rs_data_bytes=16, rs_parity_bytes=8, block_repeats=2, sync_every_blocks=4)),
-    (45,   "below_noise_45baud_snr-21dB.wav",   dict(rs_data_bytes=32, rs_parity_bytes=8, block_repeats=2, sync_every_blocks=4)),
-    (300,  "below_noise_300baud_snr-10dB.wav",  dict(rs_data_bytes=16, rs_parity_bytes=8, block_repeats=1, sync_every_blocks=4)),
-    (1200, "below_noise_1200baud_snr-4dB.wav",  dict(rs_data_bytes=16, rs_parity_bytes=8, block_repeats=1, sync_every_blocks=4)),
+    (9,    "below_noise_9baud_snr-27dB.wav",    dict(tone_spacing_hz=100.0, rs_data_bytes=16, rs_parity_bytes=8, block_repeats=2, sync_every_blocks=4)),
+    (45,   "below_noise_45baud_snr-21dB.wav",   dict(tone_spacing_hz=200.0, rs_data_bytes=32, rs_parity_bytes=8, block_repeats=2, sync_every_blocks=4)),
+    (300,  "below_noise_300baud_snr-10dB.wav",  dict(tone_spacing_hz=300.0, rs_data_bytes=16, rs_parity_bytes=8, block_repeats=1, sync_every_blocks=4)),
+    (1200, "below_noise_1200baud_snr-4dB.wav",  dict(tone_spacing_hz=1200.0, rs_data_bytes=16, rs_parity_bytes=8, block_repeats=1, sync_every_blocks=4)),
+    # Deep = aggressive block_repeats=4 for 3 dB below default-preset cliff.
+    (9,    "below_noise_deep_9baud_snr-30dB.wav",    dict(tone_spacing_hz=100.0, rs_data_bytes=16, rs_parity_bytes=8, block_repeats=4, sync_every_blocks=4)),
+    (45,   "below_noise_deep_45baud_snr-24dB.wav",   dict(tone_spacing_hz=200.0, rs_data_bytes=32, rs_parity_bytes=8, block_repeats=4, sync_every_blocks=4)),
+    (300,  "below_noise_deep_300baud_snr-13dB.wav",  dict(tone_spacing_hz=300.0, rs_data_bytes=16, rs_parity_bytes=8, block_repeats=4, sync_every_blocks=4)),
+    (1200, "below_noise_deep_1200baud_snr-7dB.wav",  dict(tone_spacing_hz=1200.0, rs_data_bytes=16, rs_parity_bytes=8, block_repeats=4, sync_every_blocks=4)),
 ]
 
 WAV_DIR = Path(__file__).resolve().parents[1] / "test_signals"
