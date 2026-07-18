@@ -44,31 +44,44 @@ echo -n "over the room" | ./weaklink-9a3ice-linux-x86_64-latest tx
 # Ctrl-C the rx after the tones stop
 ```
 
-## Recommended presets
+## Supported presets
 
-Both sides launch with matching flags — there is no handshake, so config
-has to agree.
+Four hard-coded baud presets. Any other `--modem-baud` value raises
+`NotImplementedError` — the tone stacks are tuned per preset and there's no
+point pretending arbitrary bauds work. Both sides launch with matching
+flags (there is no handshake, so config has to agree).
 
-**Fast, clean channels** (default, 300 baud):
+| Baud | 4-FSK tones (Hz) | Total spread | Fits 2.7 kHz SSB? | Approx cliff (SNR in 3 kHz) |
+|---:|---|---:|---|---:|
+| 9 | 1350 / 1450 / 1550 / 1650 | 300 Hz | ✓ | ≈ −20 dB |
+| 45 | 1200 / 1400 / 1600 / 1800 | 600 Hz | ✓ | ≈ −14 dB |
+| 300 | 1050 / 1350 / 1650 / 1950 | 900 Hz | ✓ | ≈ −3 dB |
+| 1200 | 500 / 1700 / 2900 / 4100 | 3600 Hz | ✗ (wideband only) | ≈ +2 dB |
+
+**Fast, clean channels** (default, 300 baud, ~1 kbps):
 ```bash
 ./weaklink-9a3ice-linux-x86_64-latest tx | ./weaklink-9a3ice-linux-x86_64-latest rx
-# ~1 kbps, cliff ≈ −3 dB SNR (3 kHz ref)
 ```
 
-**Moderate noise, ~100-byte messages** (100 baud + block repetition):
+**Moderate noise via SSB** (45 baud, ~20 bit/s):
 ```bash
-FLAGS="--modem-baud 100 --modem-block-repeats 2"
-./weaklink-9a3ice-linux-x86_64-latest tx $FLAGS < msg.txt
-./weaklink-9a3ice-linux-x86_64-latest rx $FLAGS > received.txt
-# ~30 s per 100 chars, cliff ≈ −10 dB SNR
+./weaklink-9a3ice-linux-x86_64-latest tx --modem-baud 45 < msg.txt
+./weaklink-9a3ice-linux-x86_64-latest rx --modem-baud 45 > received.txt
 ```
 
-**Extreme noise, short messages only** (9 baud):
+**Weak-signal / short messages** (9 baud, ~3 bit/s, cliff around −20 dB):
 ```bash
-FLAGS="--modem-baud 9 --modem-tone-spacing 30 --modem-block-repeats 2"
-./weaklink-9a3ice-linux-x86_64-latest tx $FLAGS < short_msg.txt
-# ~2 minutes for 20 chars, cliff ≈ −20 dB SNR in 3 kHz
+./weaklink-9a3ice-linux-x86_64-latest tx --modem-baud 9 < short_msg.txt
 ```
+
+**Wideband high-throughput** (1200 baud, ~500 bit/s, needs 5+ kHz channel or wired/virt):
+```bash
+./weaklink-9a3ice-linux-x86_64-latest tx --modem-baud 1200 < msg.txt
+```
+
+Add `--modem-block-repeats 2` (or 4, 8) on both sides for more coding gain
+at the cost of proportionally longer transmission — see the SNR table
+below for exact cliff shifts.
 
 ## Debugging a live-audio setup
 
@@ -207,15 +220,18 @@ prefixed `--modem-*`.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--modem-baud N` | `300` | Symbol rate. Every 10× slower ≈ 10 dB more SNR margin. |
-| `--modem-tone-spacing HZ` | `--modem-baud` | 4-FSK tone spacing. Match baud for orthogonality; widen if you have bandwidth to spare. |
+| `--modem-baud N` | `300` | Symbol rate. Only `9`, `45`, `300`, `1200` supported — others raise `NotImplementedError`. Every 4× slower ≈ 6 dB more margin. |
 | `--modem-sample-rate HZ` | `48000` | Audio sample rate. Match your soundcard. |
-| `--modem-rs-data-bytes N` | `16` | Reed-Solomon data bytes per block. |
-| `--modem-rs-parity-bytes N` | `8` | RS parity bytes. Corrects up to N/2 byte errors per block. |
+| `--modem-rs-data-bytes N` | preset | Reed-Solomon data bytes per block. |
+| `--modem-rs-parity-bytes N` | preset | RS parity bytes. Corrects up to N/2 byte errors per block. |
 | `--modem-no-rs-crc` | CRC on | Skip the payload CRC-32 inside each RS block. |
 | `--modem-sync-every-blocks N` | `4` | Preamble inserted every N data blocks. Smaller = better resync at low SNR, higher overhead. |
-| `--modem-block-repeats N` | `1` | Each block sent N times, round-robin. RX sums soft LLRs — ~2 dB per doubling in AWGN + fade diversity. |
-| `--modem-wav PATH` | live audio | WAV file mode. Omit on RX = block recording until Ctrl-C, then decode. |
+| `--modem-block-repeats N` | preset | Each block sent N times, round-robin. RX sums soft LLRs — ~2–3 dB per doubling in AWGN + fade diversity. |
+| `--modem-wav PATH` | live audio | WAV file mode instead of the live audio device. |
+| `--modem-audio-output NAME` | OS default | tx audio target: sounddevice index, substring of a device name (e.g. `USB`), or a Pulse sink name (e.g. `virt`). |
+| `--modem-audio-input NAME` | OS default | rx audio source: same syntax as output; Pulse sources like `virt.monitor` supported via `parec` subprocess. |
+| `--modem-debug` | off | Full DEBUG chatter to log file. Default INFO shows just audio levels + RS corrections + failures. |
+| `--modem-log-file PATH` | `./log.txt` | Diagnostics land here. stdout/stderr stay clean for byte piping. |
 
 ## Test suite
 
