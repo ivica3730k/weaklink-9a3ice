@@ -1,25 +1,34 @@
-"""Audio I/O: WAV files (soundfile) and live PulseAudio (sounddevice).
+"""Audio I/O: WAV files (soundfile) and live PortAudio via sounddevice.
 
-sounddevice uses PortAudio, which on Linux picks the PulseAudio backend by
-default when PulseAudio is running — so this is the "pulse audio backend in
-python" the plan asks for without hard-coupling to Pulse's own API.
+Device selection accepts four permutations, in order of precedence:
 
-Both dependencies are imported lazily so that the modem's pure-DSP tests can
-run in environments without libsndfile or an audio server.
+1. **Integer index**: a numeric string is used as a raw
+   ``sounddevice.query_devices()`` index.
+2. **Substring against a sounddevice device name**: e.g. ``USB``, ``Scarlett``,
+   ``pulse``. First device whose name contains the hint (or vice versa) wins.
+3. **Pulse sink / source name that only exists inside PulseAudio / PipeWire**:
+   e.g. a name from ``pactl list short sinks`` that isn't enumerated by
+   PortAudio. We open the generic ``pulse`` PortAudio device and set
+   ``PULSE_SINK`` / ``PULSE_SOURCE`` so libpulse routes to the named endpoint.
+   Also set the equivalent ``PIPEWIRE_NODE`` for PipeWire-based systems that
+   don't honour ``PULSE_*`` cleanly.
+4. **Nothing given**: use PortAudio's own default (respecting ``PULSE_*`` env
+   vars the user has set outside the process).
 
-Device selection honours ``PULSE_SINK``/``PULSE_SOURCE`` env vars. PortAudio
-usually takes the ALSA-plug path to Pulse, so the env vars don't reach libpulse
-in a way that changes the "default" device — we resolve them ourselves against
-``sounddevice.query_devices()`` and pass an explicit index.
+Both dependencies are imported lazily so pure-DSP tests can run without an
+audio server.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+_log = logging.getLogger("weaklink.audio")
 
 
 def write_wav(path: Path | str, samples: np.ndarray, sample_rate: float) -> None:
@@ -47,53 +56,20 @@ def read_wav(path: Path | str, *, expected_sample_rate: float | None = None) -> 
     return data, int(sample_rate)
 
 
-def play(samples: np.ndarray, sample_rate: float, *, blocking: bool = True) -> None:
-    """Play ``samples`` through the default audio device (PulseAudio on Linux)."""
+def play(samples: np.ndarray, sample_rate: float, *, device: str | None = None, blocking: bool = True) -> None:
+    """Play ``samples`` through ``device`` (name / index / Pulse-sink) or the
+    OS default."""
     sd = _import_sounddevice()
-    device = _resolve_device(sd, os.environ.get("PULSE_SINK"), kind="output")
+    hint = device if device else os.environ.get("PULSE_SINK")
+    resolved = _resolve_device(sd, hint, kind="output")
     sd.play(
         np.asarray(samples, dtype=np.float32),
         int(round(sample_rate)),
-        device=device,
+        device=resolved,
         blocking=blocking,
     )
     if blocking:
         sd.wait()
-
-
-def record_until_interrupted(sample_rate: float) -> np.ndarray:
-    """Record mono audio from the default input device until Ctrl-C.
-
-    Returns the accumulated samples as a 1-D float32 array. The stream stays
-    open across the entire recording; callers pass the whole buffer to
-    ``decode()`` once the user has interrupted.
-    """
-    import sys
-
-    sd = _import_sounddevice()
-    device = _resolve_device(sd, os.environ.get("PULSE_SOURCE"), kind="input")
-    chunks: list[np.ndarray] = []
-
-    def _callback(indata, _frames, _time, _status):
-        chunks.append(indata.copy())
-
-    print("recording — press Ctrl-C to stop and decode", file=sys.stderr, flush=True)
-    try:
-        with sd.InputStream(
-            samplerate=int(round(sample_rate)),
-            channels=1,
-            dtype="float32",
-            device=device,
-            callback=_callback,
-        ):
-            while True:
-                sd.sleep(500)
-    except KeyboardInterrupt:
-        print("stopped, decoding…", file=sys.stderr, flush=True)
-
-    if not chunks:
-        return np.zeros(0, dtype=np.float32)
-    return np.concatenate(chunks).reshape(-1)
 
 
 def _import_sounddevice() -> Any:
@@ -108,39 +84,54 @@ def _import_sounddevice() -> Any:
 
 
 def _resolve_device(sd: Any, name_hint: str | None, *, kind: str) -> int | None:
-    """Match ``name_hint`` against ``sounddevice.query_devices()`` names.
+    """Resolve a user-supplied device hint to a sounddevice index.
 
-    Returns the device index for the best match, or ``None`` to let PortAudio
-    pick its own default. Substring match is intentional -- Pulse sink names
-    like ``alsa_output.usb-Focusrite_Scarlett_Solo_...`` don't line up with
-    PortAudio's shorter human-readable strings, so we accept either direction.
+    Handles the four permutations documented at the top of this module.
+    ``kind`` is ``"input"`` or ``"output"`` -- we only match devices that
+    have channels in the requested direction.
 
-    If the hint is set but no sounddevice name matches (typical case: the hint
-    is a Pulse sink or source name that PortAudio doesn't enumerate
-    individually), fall back to the ``pulse`` PortAudio device. PulseAudio
-    itself will then honour the ``PULSE_SINK`` / ``PULSE_SOURCE`` env var for
-    that stream, routing it to the actual named sink or source.
+    For the Pulse-only fallback we set ``PULSE_SINK`` / ``PULSE_SOURCE`` (and
+    ``PIPEWIRE_NODE`` for good measure) so libpulse / pipewire-pulse routes
+    the stream once PortAudio opens the generic ``pulse`` device. Env-var
+    mutation is scoped to this process only.
     """
     if not name_hint:
         return None
     channel_attr = "max_input_channels" if kind == "input" else "max_output_channels"
+
+    # Permutation 1: bare integer -> raw sounddevice index.
+    if name_hint.lstrip("-").isdigit():
+        return int(name_hint)
+
     try:
         devices = sd.query_devices()
     except Exception:
+        _log.debug("sounddevice.query_devices() failed while resolving %r", name_hint)
         return None
     hint_lower = name_hint.lower()
-    # First: direct substring match against a sounddevice device name.
+
+    # Permutation 2: substring match against a sounddevice name.
     for index, info in enumerate(devices):
         if info.get(channel_attr, 0) <= 0:
             continue
         name = str(info.get("name", "")).lower()
         if hint_lower in name or name in hint_lower:
+            _log.debug("device hint %r -> sounddevice %d %r", name_hint, index, info["name"])
             return index
-    # Second: use the generic "pulse" PortAudio device so libpulse honours the
-    # ``PULSE_SINK`` / ``PULSE_SOURCE`` env var.
+
+    # Permutation 3: Pulse-only name. Route via the pulse/pipewire compat
+    # device, and set env vars so the library honours the requested endpoint.
+    pulse_env_var = "PULSE_SOURCE" if kind == "input" else "PULSE_SINK"
     for index, info in enumerate(devices):
         if info.get(channel_attr, 0) <= 0:
             continue
-        if str(info.get("name", "")).lower() == "pulse":
+        n = str(info.get("name", "")).lower()
+        if n in ("pulse", "pipewire"):
+            os.environ[pulse_env_var] = name_hint
+            os.environ.setdefault("PIPEWIRE_NODE", name_hint)
+            _log.debug("device hint %r -> pulse/pipewire compat device %d (%s=%s)",
+                       name_hint, index, pulse_env_var, name_hint)
             return index
+
+    _log.warning("device hint %r did not match any %s device; using default", name_hint, kind)
     return None

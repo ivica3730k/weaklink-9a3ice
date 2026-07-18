@@ -100,6 +100,25 @@ def _add_modem_args(sub: argparse.ArgumentParser) -> None:
         help="Read from / write to a WAV file instead of the live audio device.",
     )
     modem.add_argument(
+        "--modem-audio-output",
+        type=str,
+        default=None,
+        dest="modem_audio_output",
+        help="Audio output device for tx. Accepts a sounddevice index (e.g. '4'), "
+        "a substring of a device name (e.g. 'USB'), or a Pulse/PipeWire sink name "
+        "(e.g. 'virt') -- see `sounddevice.query_devices()` and `pactl list short sinks`. "
+        "Default: OS default output.",
+    )
+    modem.add_argument(
+        "--modem-audio-input",
+        type=str,
+        default=None,
+        dest="modem_audio_input",
+        help="Audio input device for rx. Same syntax as --modem-audio-output but "
+        "matches against input devices / Pulse source names (e.g. 'virt.monitor'). "
+        "Default: OS default input.",
+    )
+    modem.add_argument(
         "--modem-debug",
         dest="modem_debug",
         action="store_true",
@@ -178,7 +197,7 @@ def _run_tx(args: argparse.Namespace) -> int:
     else:
         from weaklink.modem.audio import play
 
-        play(samples, config.waveform.sample_rate)
+        play(samples, config.waveform.sample_rate, device=args.modem_audio_output)
     return 0
 
 
@@ -200,10 +219,10 @@ def _run_rx(args: argparse.Namespace) -> int:
     # Live mode: streaming decode. As samples come in from the audio device we
     # re-decode the growing buffer once per second and print any newly-decoded
     # bytes to stdout immediately. Ctrl-C stops recording.
-    return _live_stream_decode(config)
+    return _live_stream_decode(config, audio_input=args.modem_audio_input)
 
 
-def _live_stream_decode(config: ModemConfig) -> int:
+def _live_stream_decode(config: ModemConfig, *, audio_input: str | None = None) -> int:
     import os
 
     import numpy as np
@@ -211,15 +230,14 @@ def _live_stream_decode(config: ModemConfig) -> int:
     from weaklink.modem.audio import _import_sounddevice, _resolve_device
 
     sd = _import_sounddevice()
-    pulse_source = os.environ.get("PULSE_SOURCE")
-    input_device = _resolve_device(sd, pulse_source, kind="input")
-    if pulse_source:
+    hint = audio_input if audio_input else os.environ.get("PULSE_SOURCE")
+    input_device = _resolve_device(sd, hint, kind="input")
+    if hint:
         if input_device is not None:
-            _log.debug("PULSE_SOURCE=%s -> input device index %d (%s)",
-                       pulse_source, input_device, sd.query_devices(input_device)["name"])
+            _log.debug("audio input hint %r -> device index %d (%s)",
+                       hint, input_device, sd.query_devices(input_device)["name"])
         else:
-            _log.debug("PULSE_SOURCE=%s did not match any input device; using PortAudio default",
-                       pulse_source)
+            _log.debug("audio input hint %r did not match; using PortAudio default", hint)
     sample_rate = int(round(config.waveform.sample_rate))
 
     # Rolling audio buffer with a sample-cursor model. samples_before_buffer is
