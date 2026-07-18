@@ -319,12 +319,25 @@ def decode(samples: np.ndarray, config: ModemConfig, *, streaming: bool = False)
     total_blocks_attempted = 0
     total_blocks_decoded = 0
     total_rs_errors_corrected = 0
+    # A legitimate group carries at most ``sync_every_blocks`` data blocks,
+    # each transmitted ``block_repeats`` times. Any pair of preambles that
+    # spans more than this cannot be the two ends of a single group -- they
+    # must belong to *different* transmissions with silence (or garbage)
+    # between them. Skip the fake group rather than pushing garbage bits
+    # through Viterbi and blowing up in RS.
+    max_group_span_symbols = config.sync_every_blocks * repeats * block_length
     for peak_index in range(len(peaks_with_end) - 1):
         group_start = peaks_with_end[peak_index] + len(preamble)
         group_end = peaks_with_end[peak_index + 1]
         span = group_end - group_start
         transmitted_blocks = span // block_length
         if transmitted_blocks == 0:
+            continue
+        if span > max_group_span_symbols + block_length:
+            _log.debug(
+                "group %d skipped: span %d symbols exceeds max group %d (unrelated preambles)",
+                peak_index, span, max_group_span_symbols,
+            )
             continue
         num_data_blocks = transmitted_blocks // repeats
         if num_data_blocks == 0:
