@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-from weaklink.modem.codec import ModemConfig, decode, encode
+from weaklink.modem.codec import ModemConfig, decode, encode, encode_stream
 from weaklink.modem.waveform import WaveformConfig
 
 DEFAULT_LOG_PATH = Path("log.txt")
@@ -206,28 +206,49 @@ def _run_tx(args: argparse.Namespace) -> int:
     import numpy as np
 
     config = _make_config(args)
-    payload = sys.stdin.buffer.read()
-    samples = encode(payload, config)
     if args.modem_wav is not None:
+        # WAV mode reads all of stdin first (WAV is a random-access
+        # format anyway -- we need the total length before writing the
+        # header).
         from weaklink.modem.audio import write_wav
 
+        payload = sys.stdin.buffer.read()
+        samples = encode(payload, config)
         write_wav(args.modem_wav, samples, config.waveform.sample_rate)
-    else:
-        from weaklink.modem.audio import play
+        return 0
 
-        sample_rate = config.waveform.sample_rate
-        signal_seconds = len(samples) / sample_rate
-        # Pilot each side: at least ``_LIVE_TX_PILOT_MIN_SECONDS`` for
-        # sink-warmup / FFT lock, more if the signal is short enough that
-        # total tx would fall below ``_LIVE_TX_MIN_SECONDS``.
-        pilot_each_side = max(
-            _LIVE_TX_PILOT_MIN_SECONDS,
-            (_LIVE_TX_MIN_SECONDS - signal_seconds) / 2.0,
-            _LIVE_TX_PILOT_MIN_SYMBOLS / config.waveform.baud,
-        )
-        pilot = _pilot_signal(config, pilot_each_side).astype(np.float32)
-        padded = np.concatenate([pilot, samples, pilot])
-        play(padded, sample_rate, device=args.modem_audio_output)
+    from weaklink.modem.audio import play_stream
+
+    sample_rate = config.waveform.sample_rate
+    # Leading pilot is unconditional (short bursts otherwise fall below
+    # _LIVE_TX_MIN_SECONDS). For truly long streams the "bring the
+    # signal up to 1 s" clause is a no-op, so we split the min-duration
+    # padding across leading pilot only when we know the signal length
+    # (WAV path). For streaming, use symbol-space floor + fixed seconds.
+    leading_pilot_seconds = max(
+        _LIVE_TX_PILOT_MIN_SECONDS,
+        _LIVE_TX_PILOT_MIN_SYMBOLS / config.waveform.baud,
+    )
+    leading_pilot = _pilot_signal(config, leading_pilot_seconds).astype(np.float32)
+    trailing_pilot = leading_pilot  # same duration each side
+
+    def stdin_chunks() -> "Iterable[bytes]":  # noqa: F821
+        # Read modest-sized chunks so the encoder can start emitting
+        # audio before the whole input arrives (matters for pipes like
+        # ``tail -f | tx`` or slow-generating commands).
+        while True:
+            block = sys.stdin.buffer.read(4096)
+            if not block:
+                return
+            yield block
+
+    def sample_chunks():
+        yield leading_pilot
+        for audio in encode_stream(stdin_chunks(), config):
+            yield audio
+        yield trailing_pilot
+
+    play_stream(sample_chunks(), sample_rate, device=args.modem_audio_output)
     return 0
 
 

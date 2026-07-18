@@ -150,6 +150,68 @@ def _play_pulse(samples: np.ndarray, sample_rate: int, sink_name: str) -> None:
         raise RuntimeError(f"paplay exited {proc.returncode}: {err.decode(errors='replace')}")
 
 
+def play_stream(
+    sample_chunks,
+    sample_rate: float,
+    *,
+    device: str | None = None,
+) -> None:
+    """Play float32 mono audio as it arrives from ``sample_chunks`` --
+    used to stream long tx without buffering the whole encoded signal.
+    Pulse targets pipe into ``paplay --raw``; sounddevice targets use an
+    OutputStream and ``.write`` chunk by chunk."""
+    hint = device if device else os.environ.get("PULSE_SINK")
+    target = resolve_audio_target(hint, kind="output")
+    rate = int(round(sample_rate))
+    if target.pulse_name is not None:
+        _play_pulse_stream(sample_chunks, rate, target.pulse_name)
+        return
+    sd = _import_sounddevice()
+    stream = sd.OutputStream(
+        samplerate=rate,
+        channels=1,
+        dtype="float32",
+        device=target.sd_index,
+    )
+    stream.start()
+    try:
+        for chunk in sample_chunks:
+            arr = np.asarray(chunk, dtype=np.float32).reshape(-1, 1)
+            stream.write(arr)
+    finally:
+        stream.stop()
+        stream.close()
+
+
+def _play_pulse_stream(sample_chunks, sample_rate: int, sink_name: str) -> None:
+    proc = subprocess.Popen(
+        [
+            "paplay",
+            f"--device={sink_name}",
+            "--format=float32le",
+            f"--rate={sample_rate}",
+            "--channels=1",
+            "--raw",
+        ],
+        stdin=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        for chunk in sample_chunks:
+            proc.stdin.write(np.asarray(chunk, dtype=np.float32).tobytes())
+    except BrokenPipeError:
+        pass
+    finally:
+        try:
+            proc.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
+    err = proc.stderr.read() or b""
+    proc.wait()
+    if proc.returncode != 0:
+        raise RuntimeError(f"paplay exited {proc.returncode}: {err.decode(errors='replace')}")
+
+
 class LiveInputStream:
     """Uniform live-audio input over sounddevice or ``parec``.
 

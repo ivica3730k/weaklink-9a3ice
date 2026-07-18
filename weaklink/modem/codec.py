@@ -16,6 +16,7 @@ non-block-length spans between adjacent preambles.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Iterable, Iterator
 
 import numpy as np
 
@@ -135,47 +136,90 @@ def _encode_one_block(payload: bytes, config: ModemConfig) -> np.ndarray:
     return bits_to_symbols(padded)
 
 
-def encode(input_bytes: bytes, config: ModemConfig) -> np.ndarray:
-    """Encode bytes to float32 audio.
+#: Per-slot data-area header: ``[length 1B][block_index 2B]``. Length
+#: strips trailing NUL padding; block_index dedupes copies (see
+#: block_repeats) and picks the RX output slot.
+_HEADER_BYTES: int = 3
+_MAX_BLOCK_INDEX: int = 0xFFFF
 
-    Wire layout: ``[pre][slot 0][pre][slot 1][pre] ... [slot N-1][pre]``.
-    Each slot carries one RS-encoded block whose data area is
-    ``[length, block_index, payload..., zero_pad]``. RX decodes each
-    slot independently; block_index picks the right output position and
-    lets duplicate copies dedupe. Any single copy that clears CRC is
-    enough to recover a block.
+
+def _validate_data_bytes(data_bytes: int) -> None:
+    if data_bytes < _HEADER_BYTES + 1:
+        raise ValueError(
+            f"rs_data_bytes must be >= {_HEADER_BYTES + 1} (header + 1 payload byte)"
+        )
+    if data_bytes > 256:
+        raise ValueError("rs_data_bytes must be <= 256 (length header is 1 byte)")
+
+
+def _frame_block(chunk: bytes, block_index: int, payload_per_block: int) -> bytes:
+    return (
+        bytes([len(chunk), (block_index >> 8) & 0xFF, block_index & 0xFF])
+        + chunk
+        + b"\x00" * (payload_per_block - len(chunk))
+    )
+
+
+def encode_stream(
+    byte_iter: "Iterable[bytes]", config: ModemConfig
+) -> "Iterator[np.ndarray]":
+    """Generator: consume bytes from ``byte_iter``, yield float32 audio
+    chunks. Emits one audio chunk per slot (leading preamble + block,
+    repeated ``block_repeats`` times per block), then a trailing preamble
+    marker. block_index wraps at 65535; anything longer needs another
+    tx session.
+
+    Wire layout, per stream: ``[pre][slot 0][pre][slot 0]... x R
+    [pre][slot 1]...``. Copies of the same block are adjacent (we don't
+    know the total block count upfront), so RX dedupes by block_index.
     """
     codec = config.rs_codec()
     data_bytes = codec.config.data_bytes
-    if data_bytes < 3:
-        raise ValueError("rs_data_bytes must be >= 3 (length + block_index + 1 payload byte)")
-    if data_bytes > 256:
-        raise ValueError("rs_data_bytes must be <= 256 for a single-byte length header")
+    _validate_data_bytes(data_bytes)
+    payload_per_block = data_bytes - _HEADER_BYTES
 
-    payload_per_block = data_bytes - 2  # length + block_index
-    block_payloads: list[bytes] = []
-    for start in range(0, max(len(input_bytes), 1), payload_per_block):
-        chunk = input_bytes[start : start + payload_per_block]
-        block_payloads.append(chunk)
-    if not block_payloads:
-        block_payloads = [b""]
-    if len(block_payloads) > 256:
-        raise ValueError("payload too large: >256 blocks, single-byte block_index cannot address them")
+    pre_audio = modulate(PREAMBLE_SYMBOLS, config.waveform)
 
-    pre = PREAMBLE_SYMBOLS
-    symbol_pieces: list[np.ndarray] = []
-    for _copy in range(config.block_repeats):
-        for block_index, chunk in enumerate(block_payloads):
-            framed = (
-                bytes([len(chunk), block_index])
-                + chunk
-                + b"\x00" * (payload_per_block - len(chunk))
+    def emit_block(chunk_bytes: bytes, block_index: int) -> "Iterator[np.ndarray]":
+        framed = _frame_block(chunk_bytes, block_index, payload_per_block)
+        block_symbols = _encode_one_block(framed, config)
+        merged = np.concatenate([PREAMBLE_SYMBOLS, block_symbols])
+        merged_audio = modulate(merged, config.waveform)
+        for _ in range(config.block_repeats):
+            yield merged_audio
+
+    buffer = bytearray()
+    block_index = 0
+    emitted_any = False
+    for chunk in byte_iter:
+        buffer.extend(chunk)
+        while len(buffer) >= payload_per_block:
+            if block_index > _MAX_BLOCK_INDEX:
+                raise ValueError(
+                    f"stream too long: block_index exceeded {_MAX_BLOCK_INDEX}"
+                )
+            yield from emit_block(bytes(buffer[:payload_per_block]), block_index)
+            del buffer[:payload_per_block]
+            block_index += 1
+            emitted_any = True
+
+    if buffer or not emitted_any:
+        if block_index > _MAX_BLOCK_INDEX:
+            raise ValueError(
+                f"stream too long: block_index exceeded {_MAX_BLOCK_INDEX}"
             )
-            symbol_pieces.append(pre)
-            symbol_pieces.append(_encode_one_block(framed, config))
-    symbol_pieces.append(pre)  # trailing marker
-    all_symbols = np.concatenate(symbol_pieces) if symbol_pieces else np.zeros(0, dtype=np.int8)
-    return modulate(all_symbols, config.waveform)
+        yield from emit_block(bytes(buffer), block_index)
+
+    yield pre_audio  # trailing marker
+
+
+def encode(input_bytes: bytes, config: ModemConfig) -> np.ndarray:
+    """Batch-encode ``input_bytes`` to float32 audio. Thin wrapper around
+    :func:`encode_stream` for tests / WAV output."""
+    parts = list(encode_stream(iter([input_bytes]), config))
+    if not parts:
+        return np.zeros(0, dtype=np.float32)
+    return np.concatenate(parts)
 
 
 import logging as _logging
@@ -297,38 +341,59 @@ def decode(samples: np.ndarray, config: ModemConfig, *, streaming: bool = False)
                 virtual = 0
             per_peak_offsets = [coarse_offset] + per_peak_offsets
             peaks = [virtual] + peaks
-        # Tail padding: virtual trailing preamble one slot's-worth after
-        # the last real one.
-        virtual_end = peaks[-1] + len(preamble) + block_length
-        if virtual_end > coarse_magnitudes.shape[0]:
-            coarse_magnitudes, samples = _pad_zeros(
-                coarse_magnitudes, samples, samples_per_symbol,
-                n_symbols=virtual_end - coarse_magnitudes.shape[0], side="tail",
-            )
-        per_peak_offsets = per_peak_offsets + [coarse_offset]
-        peaks = peaks + [virtual_end]
+        # Tail padding: project a virtual trailing preamble only when
+        # there's meaningful signal after the last real peak (i.e. the
+        # tx trailing preamble was chopped off, leaving a bare slot).
+        # If the buffer already ends right at a real trailing preamble,
+        # projecting would decode zero-padded silence and log a bogus
+        # CRC failure.
+        tail_symbols_after_last_peak = coarse_magnitudes.shape[0] - peaks[-1] - len(preamble)
+        if tail_symbols_after_last_peak > block_length // 2:
+            virtual_end = peaks[-1] + len(preamble) + block_length
+            if virtual_end > coarse_magnitudes.shape[0]:
+                coarse_magnitudes, samples = _pad_zeros(
+                    coarse_magnitudes, samples, samples_per_symbol,
+                    n_symbols=virtual_end - coarse_magnitudes.shape[0], side="tail",
+                )
+            per_peak_offsets = per_peak_offsets + [coarse_offset]
+            peaks = peaks + [virtual_end]
 
     def _flush_message(msg: dict[int, bytes]) -> None:
-        i = 0
-        while i in msg:
+        # Emit in block_index order. Missing indices leave a gap (a
+        # single unrecoverable slot doesn't take the whole tail of a
+        # long stream with it).
+        for i in sorted(msg.keys()):
             output.extend(msg[i])
-            i += 1
 
+    stride = block_length + len(preamble)
     current_msg: dict[int, bytes] = {}
-    for slot_i in range(len(peaks) - 1):
+    slot_i = 0
+    while slot_i < len(peaks) - 1:
         slot_start = peaks[slot_i] + len(preamble)
         slot_end = peaks[slot_i + 1]
         span = slot_end - slot_start
-        # Within a message every span equals block_length exactly.
-        # Anything else -- adjacent preambles (boundary), pilot gap
-        # (boundary from another tx), truncated tail -- means the
-        # current message is done. Flush and skip.
         if abs(span - block_length) > 4:
-            _log.debug("slot %d span %d != block_length; message boundary", slot_i, span)
+            # Not a valid slot span. Two cases:
+            # (a) peaks[slot_i + 1] is a spurious mid-message hit --
+            #     peaks[slot_i] and peaks[slot_i + 2] then sit at the
+            #     usual stride and we can decode across the spurious
+            #     peak by skipping it.
+            # (b) real message boundary (adjacent preambles / pilot
+            #     gap between separate tx sessions) -- flush + advance.
+            spurious = False
+            if slot_i + 2 < len(peaks):
+                two_step = peaks[slot_i + 2] - peaks[slot_i]
+                spurious = abs(two_step - stride) <= 4
+            if spurious:
+                _log.debug("slot %d: dropping spurious peak %d", slot_i, peaks[slot_i + 1])
+                del peaks[slot_i + 1]
+                del per_peak_offsets[slot_i + 1]
+                continue  # retry with the same slot_i
+            _log.debug("slot %d span %d: message boundary", slot_i, span)
             _flush_message(current_msg)
             current_msg = {}
+            slot_i += 1
             continue
-        slot_attempted += 1
         slot_offset = per_peak_offsets[slot_i]
         if abs(slot_offset - coarse_offset) > 0.5:
             sample_start = slot_start * samples_per_symbol
@@ -338,23 +403,24 @@ def decode(samples: np.ndarray, config: ModemConfig, *, streaming: bool = False)
             )[:block_length]
         else:
             slot_mags = coarse_magnitudes[slot_start : slot_start + block_length]
-        if slot_mags.shape[0] < block_length:
-            continue
-        soft = soft_bits_from_magnitudes(slot_mags)
-        decoded, errors_corrected = _decode_one_block_from_soft(soft, config, codec)
-        if decoded is None or len(decoded) < 2:
-            continue
-        length = decoded[0]
-        block_index = decoded[1]
-        payload_area_size = len(decoded) - 2
-        if length > payload_area_size:
-            length = payload_area_size
-        if block_index in current_msg:
-            continue  # duplicate copy
-        current_msg[block_index] = bytes(decoded[2 : 2 + length])
-        slot_decoded += 1
-        if errors_corrected > 0:
-            total_rs_errors_corrected += errors_corrected
+        if slot_mags.shape[0] >= block_length:
+            slot_attempted += 1
+            soft = soft_bits_from_magnitudes(slot_mags)
+            decoded, errors_corrected = _decode_one_block_from_soft(soft, config, codec)
+            if decoded is not None and len(decoded) >= _HEADER_BYTES:
+                length = decoded[0]
+                block_index = (decoded[1] << 8) | decoded[2]
+                payload_area_size = len(decoded) - _HEADER_BYTES
+                if length > payload_area_size:
+                    length = payload_area_size
+                slot_decoded += 1  # RS+CRC ok, regardless of dedupe
+                if block_index not in current_msg:
+                    current_msg[block_index] = bytes(
+                        decoded[_HEADER_BYTES : _HEADER_BYTES + length]
+                    )
+                    if errors_corrected > 0:
+                        total_rs_errors_corrected += errors_corrected
+        slot_i += 1
 
     _flush_message(current_msg)
 
