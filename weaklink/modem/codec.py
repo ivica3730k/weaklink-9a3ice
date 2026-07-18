@@ -53,6 +53,7 @@ def _generate_preamble(length: int, seed: int = 0xC05A) -> tuple[int, ...]:
 
 
 _PREAMBLE_SYMBOLS: tuple[int, ...] = _generate_preamble(PREAMBLE_LENGTH_SYMBOLS)
+_PREAMBLE_SYMBOLS_ARR: np.ndarray = np.asarray(_PREAMBLE_SYMBOLS, dtype=np.int8)
 
 
 @dataclass(frozen=True)
@@ -96,7 +97,7 @@ class ModemConfig:
 
 
 def preamble_symbols() -> np.ndarray:
-    return np.asarray(_PREAMBLE_SYMBOLS, dtype=np.int8)
+    return _PREAMBLE_SYMBOLS_ARR
 
 
 def _pad_zeros(

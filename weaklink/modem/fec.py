@@ -104,25 +104,25 @@ def decode(soft_bits: np.ndarray, num_output_bits: int) -> bytes:
     )  # shape (NUM_STATES, 2)
     back_pred = np.zeros((num_steps, NUM_STATES), dtype=np.int8)
 
+    # Loop-invariants hoisted from the per-step body.
+    signs = 1.0 - 2.0 * _OUTPUTS.astype(np.float64)  # (NUM_STATES, 2, 2)
+    # Predecessor input bit for each destination: top bit of dest state,
+    # since dest = (u << K-1 | prev) >> 1.
+    dest_input_bit = ((np.arange(NUM_STATES) >> (CONSTRAINT_LENGTH - 2)) & 1).astype(np.int64)
+    prev0 = predecessors[:, 0]
+    prev1 = predecessors[:, 1]
+
     for step in range(num_steps):
         pair0 = float(soft_bits[2 * step])
         pair1 = float(soft_bits[2 * step + 1])
-        signs = 1.0 - 2.0 * _OUTPUTS.astype(np.float64)
-        branch_metrics = signs[:, :, 0] * pair0 + signs[:, :, 1] * pair1  # (NUM_STATES, 2)
-        candidate_metrics = metric[:, None] + branch_metrics  # indexed by (prev_state, input_bit)
+        branch_metrics = signs[:, :, 0] * pair0 + signs[:, :, 1] * pair1
+        candidate_metrics = metric[:, None] + branch_metrics
 
-        # For each destination state, gather both predecessors' candidate metrics.
-        # Predecessor `p` used input bit u = (dest_state >> (K-2)) & 1 — the top
-        # bit of the destination state (since dest = (u << K-1 | prev) >> 1).
-        dest_input_bit = ((np.arange(NUM_STATES) >> (CONSTRAINT_LENGTH - 2)) & 1).astype(np.int64)
-        prev0 = predecessors[:, 0]
-        prev1 = predecessors[:, 1]
         metric_a = candidate_metrics[prev0, dest_input_bit]
         metric_b = candidate_metrics[prev1, dest_input_bit]
         pick_second = metric_b > metric_a
-        new_metric = np.where(pick_second, metric_b, metric_a)
+        metric = np.where(pick_second, metric_b, metric_a)
         back_pred[step] = pick_second.astype(np.int8)
-        metric = new_metric
 
     # Traceback from the terminating state 0.
     state = 0
