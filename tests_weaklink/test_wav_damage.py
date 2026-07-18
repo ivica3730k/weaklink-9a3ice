@@ -64,6 +64,14 @@ def _apply_fading(buf: np.ndarray, dB_range: float, cycles: float, sample_rate: 
     return (buf * envelope.astype(np.float32)).astype(np.float32)
 
 
+def _apply_awgn(buf: np.ndarray, snr_db: float, seed: int) -> np.ndarray:
+    """Add white Gaussian noise so the signal-to-noise ratio is ``snr_db``."""
+    sig_p = float(np.mean(buf.astype(np.float64) ** 2))
+    noise_p = sig_p * 10 ** (-snr_db / 10.0)
+    rng = np.random.default_rng(seed)
+    return (buf + rng.standard_normal(buf.size).astype(np.float32) * np.sqrt(noise_p)).astype(np.float32)
+
+
 # ---------------------------------------------------------------------
 # Parametrise (baud, payload, damage-label, damage-fn). ``damage-fn``
 # takes (audio, sample_rate) and returns the damaged audio.
@@ -113,6 +121,16 @@ for baud in (45, 300, 1200):
         baud, PAYLOAD_10B,
         "head-chop-100ms+fade-6dB",
         lambda a, sr: _apply_fading(_apply_head_chop(a, 100.0, sr), 6.0, 1.5, sr),
+    ))
+
+# AWGN at ~3 dB above each preset's cliff (replaces the old committed
+# below_noise/*.wav regression coverage -- generated at test time now).
+_AWGN_TARGETS = {45: -21.0, 300: -10.0, 1200: -4.0}
+for baud, snr in _AWGN_TARGETS.items():
+    CASES.append((
+        baud, PAYLOAD_10B,
+        f"awgn-{int(snr):+d}dB",
+        lambda a, sr, s=snr: _apply_awgn(a, s, seed=1),
     ))
 
 
