@@ -186,17 +186,31 @@ def _make_config(args: argparse.Namespace) -> ModemConfig:
     )
 
 
-#: Broadband-noise padding around the modem signal on live tx paths.
-#: Silence doesn't wake an IDLE PipeWire / PulseAudio sink; a warm-up
-#: sample stream does. Earlier revisions used a sinusoid, but any pure
-#: tone creates a spectral spike that the coarse-offset FFT estimator
-#: locks onto and drags the whole correlator off the real modem tones.
-#: White noise has flat power spectral density -- it wakes the sink
-#: without biasing the FFT toward any particular frequency.
-_LIVE_TX_PILOT_SECONDS: float = 0.2
-#: Pilot amplitude well below the modem signal so the sink's peak-limiter
-#: (if any) doesn't kick in and so the noise floor stays realistic.
-_LIVE_TX_PILOT_AMPLITUDE: float = 0.05
+#: Minimum live-tx duration in seconds. Short payloads at high baud finish
+#: in <500 ms, which leaves the RX with a mostly-silent buffer for the
+#: first decode attempt -- the coarse-offset FFT then picks a spurious
+#: offset off of stray pilot noise. Padding with real 4-FSK pilot symbols
+#: gives the FFT genuine tone energy at the right positions and always
+#: produces a buffer with enough signal to lock cleanly.
+_LIVE_TX_MIN_SECONDS: float = 3.0
+#: Minimum pilot duration on each side of the modem signal, even for long
+#: payloads. Wakes the sink and keeps it in RUNNING past the last symbol.
+_LIVE_TX_PILOT_MIN_SECONDS: float = 0.4
+
+
+def _pilot_signal(config: ModemConfig, duration_seconds: float) -> "np.ndarray":  # noqa: F821
+    """Produce ``duration_seconds`` of 4-FSK pilot -- modem-tone audio that
+    carries no data. Pseudo-random symbol sequence so all four tones are
+    exercised uniformly and the coarse-offset FFT sees real tone energy at
+    every expected position."""
+    import numpy as np
+
+    from weaklink.modem.waveform import BITS_PER_SYMBOL, NUM_TONES, modulate
+
+    symbols_needed = max(1, int(round(duration_seconds * config.waveform.baud)))
+    rng = np.random.default_rng(0xC0DE)
+    symbols = rng.integers(0, NUM_TONES, size=symbols_needed, dtype=np.int64)
+    return modulate(symbols, config.waveform)
 
 
 def _run_tx(args: argparse.Namespace) -> int:
@@ -213,13 +227,14 @@ def _run_tx(args: argparse.Namespace) -> int:
         from weaklink.modem.audio import play
 
         sample_rate = config.waveform.sample_rate
-        pilot_frames = int(round(_LIVE_TX_PILOT_SECONDS * sample_rate))
-        # Deterministic seed keeps identical TX inputs producing identical
-        # audio -- easier to diagnose off-air captures if they diverge.
-        rng = np.random.default_rng(0xC0DE)
-        pilot = (
-            _LIVE_TX_PILOT_AMPLITUDE * rng.standard_normal(pilot_frames)
-        ).astype(np.float32)
+        signal_seconds = len(samples) / sample_rate
+        # Pilot duration: enough to hit ``_LIVE_TX_MIN_SECONDS`` total, split
+        # evenly around the signal, but never below the pilot-min floor.
+        pilot_each_side = max(
+            _LIVE_TX_PILOT_MIN_SECONDS,
+            (_LIVE_TX_MIN_SECONDS - signal_seconds) / 2.0,
+        )
+        pilot = _pilot_signal(config, pilot_each_side).astype(np.float32)
         padded = np.concatenate([pilot, samples, pilot])
         play(padded, sample_rate, device=args.modem_audio_output)
     return 0
