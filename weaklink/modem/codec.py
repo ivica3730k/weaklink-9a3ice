@@ -263,8 +263,20 @@ def decode(samples: np.ndarray, config: ModemConfig, *, streaming: bool = False)
         _log.debug("no preambles above threshold")
         return (b"", 0) if streaming else b""
     if streaming and len(peaks) < 2:
-        # Only one preamble seen -- we can't be sure the trailing preamble has
-        # arrived yet. Leave everything for the next call.
+        # Only one preamble seen -- keep it as an anchor for the next call
+        # UNLESS enough audio has passed that the trailing preamble should
+        # have already arrived. In that case the transmission was truncated
+        # or this peak was a false positive; advance past it so we stop
+        # re-finding it every poll.
+        preamble_length = len(preamble)
+        max_group_symbols = config.sync_every_blocks * _block_symbol_length(config) + preamble_length
+        symbols_past_preamble = coarse_magnitudes.shape[0] - peaks[0]
+        if symbols_past_preamble > 2 * max_group_symbols:
+            _log.debug(
+                "single preamble at %d is stale (%d symbols past, threshold %d); dropping",
+                peaks[0], symbols_past_preamble, 2 * max_group_symbols,
+            )
+            return b"", (peaks[0] + preamble_length) * samples_per_symbol
         return b"", peaks[0] * samples_per_symbol
 
     # 3. Per-preamble fine offset. Each peak gets its own estimate so slow
