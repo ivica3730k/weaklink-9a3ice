@@ -310,6 +310,77 @@ def decode(samples: np.ndarray, config: ModemConfig, *, streaming: bool = False)
         # last preamble might be an incomplete group and should wait.
         peaks_with_end = peaks
     else:
+        # Project a virtual leading preamble one group's-worth before the
+        # first real preamble. Recovers head-chopped signals (rx started
+        # late, leading preamble lost to sink wake-up) by treating the
+        # pair (virtual, first_real) as a normal group. If the projection
+        # lands *before* the buffer start we zero-pad the magnitude window
+        # for the missing symbols and let Reed-Solomon carry the load --
+        # up to a byte of front-loaded loss is well within RS(28,16)'s
+        # correction budget. For unchopped signals the virtual peak sits
+        # inside the pilot and the pair decodes to garbage that CRC + RS
+        # quietly discard.
+        #
+        # Force the virtual group to use coarse-offset directly (pin its
+        # per-peak offset to coarse_offset) so the fine-offset re-demod
+        # path -- which uses un-padded ``samples`` and would index into
+        # the wrong region after magnitudes get padded -- is never taken.
+        # Project virtual preambles on both ends of the peak list so a
+        # chopped leading (rx started late) or chopped trailing (rx Ctrl-C'd
+        # early / sink underran) preamble both stay recoverable. Each
+        # virtual preamble sits one group's-worth from the nearest real
+        # peak; if that projection lands outside the buffer we pad
+        # ``coarse_magnitudes`` and ``samples`` with zeros for the missing
+        # symbols and let Reed-Solomon carry the recovery. Up to about a
+        # byte's worth of front- or back-loaded loss is inside RS(28,16)'s
+        # correction budget. For unchopped signals the virtual peaks sit
+        # inside pilot / silence and the resulting groups quietly fail
+        # CRC + RS.
+        #
+        # Force the virtual groups to use coarse-offset directly -- the
+        # fine-offset re-demod path uses ``samples`` at padded indices, so
+        # we pin those offsets to coarse to guarantee it takes the
+        # coarse-magnitudes-only branch.
+        block_length_symbols = _block_symbol_length(config)
+        group_symbol_span = config.block_repeats * block_length_symbols
+
+        if peaks[0] > len(preamble):
+            virtual_leading = peaks[0] - group_symbol_span - len(preamble)
+            if virtual_leading < 0:
+                pad_symbols = -virtual_leading
+                pad_rows = np.zeros(
+                    (pad_symbols, coarse_magnitudes.shape[1]),
+                    dtype=coarse_magnitudes.dtype,
+                )
+                coarse_magnitudes = np.vstack([pad_rows, coarse_magnitudes])
+                pad_samples_head = np.zeros(
+                    pad_symbols * samples_per_symbol, dtype=np.asarray(samples).dtype
+                )
+                samples = np.concatenate([pad_samples_head, np.asarray(samples)])
+                peaks = [p + pad_symbols for p in peaks]
+                virtual_leading = 0
+            per_peak_offsets = [coarse_offset] + per_peak_offsets
+            peaks = [virtual_leading] + peaks
+
+        # Virtual trailing: project one group's-worth after the last real
+        # peak. If it would land past the current end of the magnitude
+        # buffer, pad the tail with zeros the same way as the head.
+        virtual_trailing = peaks[-1] + len(preamble) + group_symbol_span
+        buffer_end = coarse_magnitudes.shape[0]
+        if virtual_trailing > buffer_end:
+            pad_symbols = virtual_trailing - buffer_end
+            pad_rows = np.zeros(
+                (pad_symbols, coarse_magnitudes.shape[1]),
+                dtype=coarse_magnitudes.dtype,
+            )
+            coarse_magnitudes = np.vstack([coarse_magnitudes, pad_rows])
+            pad_samples_tail = np.zeros(
+                pad_symbols * samples_per_symbol, dtype=np.asarray(samples).dtype
+            )
+            samples = np.concatenate([np.asarray(samples), pad_samples_tail])
+        per_peak_offsets = per_peak_offsets + [coarse_offset]
+        peaks = peaks + [virtual_trailing]
+
         peaks_with_end = peaks + [coarse_magnitudes.shape[0]]
 
     codec = config.rs_codec()

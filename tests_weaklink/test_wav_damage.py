@@ -92,27 +92,29 @@ for baud in (9, 45, 300, 1200):
             continue  # ~4 min encode; single-char covers 9-baud
         CASES.append((baud, payload, "clean", lambda a, sr: a))
 
-# Head chop: RX started late. 100 ms fits inside the 200 ms pilot and
-# decode always survives. Head chops longer than the pilot are a
-# fundamental loss -- the leading preamble is gone and the decoder can't
-# guess where a group starts without an anchor. block_repeats helps only
-# when there's a way to align to the copies; a bare trailing preamble
-# alone can't tell num_data_blocks. Recovering from >200 ms head chop
-# would need a length field or a fixed known payload size at the RS layer.
+# Head chop: RX started late. Decoder projects a virtual leading preamble
+# one group's-worth before the first real preamble; if the projection
+# lands before the buffer start (chop reached into the leading preamble
+# or beyond) the missing symbols get zero-padded and Reed-Solomon
+# carries the recovery. Test up to 500 ms which covers realistic sink
+# wake-up + a wide latency budget.
 for baud in (45, 300, 1200):
-    CASES.append((
-        baud, PAYLOAD_1B,
-        "head-chop-100ms",
-        lambda a, sr: _apply_head_chop(a, 100.0, sr),
-    ))
+    for chop_ms in (100.0, 300.0, 500.0):
+        CASES.append((
+            baud, PAYLOAD_1B,
+            f"head-chop-{int(chop_ms)}ms",
+            lambda a, sr, c=chop_ms: _apply_head_chop(a, c, sr),
+        ))
 
-# Tail chop: sink underrun / Ctrl-C too early.
+# Tail chop: sink underrun / Ctrl-C too early. The trailing pilot is
+# 200 ms; anything up to that duration is a no-op on decode.
 for baud in (45, 300, 1200):
-    CASES.append((
-        baud, PAYLOAD_1B,
-        "tail-chop-200ms",
-        lambda a, sr: _apply_tail_chop(a, 200.0, sr),
-    ))
+    for chop_ms in (200.0, 400.0):
+        CASES.append((
+            baud, PAYLOAD_1B,
+            f"tail-chop-{int(chop_ms)}ms",
+            lambda a, sr, c=chop_ms: _apply_tail_chop(a, c, sr),
+        ))
 
 # Slow fading: 10 dB peak-to-trough, ~1 fade cycle across the burst.
 for baud in (45, 300, 1200):
