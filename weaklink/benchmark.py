@@ -222,10 +222,51 @@ def update_readme(table_md: str, readme_path: Path) -> None:
     readme_path.write_text(before + f"\n\n{table_md}\n\n" + after)
 
 
+def _print_row(config: Config, result: Result, elapsed_seconds: float | None) -> None:
+    cliff = (
+        f"{result.cliff_snr_db:+.0f} dB"
+        if result.cliff_snr_db is not None else "no decode"
+    )
+    when = f"[{elapsed_seconds:5.1f}s] " if elapsed_seconds is not None else ""
+    print(
+        f"{when}baud={config.baud:>4} {config.rs_label():>13} "
+        f"repeats={config.block_repeats}x  duration={result.duration_seconds:6.1f}s  "
+        f"info={result.info_rate_bit_per_s:7.1f} bit/s  cliff={cliff:>9s}  "
+        f"shannon={result.shannon_snr_db:+.1f} dB",
+        flush=True,
+    )
+
+
+def _run_one(bundle: tuple[Config, int]) -> Result:
+    """Pool worker: run cliff-search for one config. Kept at module top
+    level so multiprocessing can pickle it."""
+    config, trials = bundle
+    payload = _random_payload(config.payload_bytes)
+    return _find_cliff(config, trials=trials, payload=payload)
+
+
 def main(argv: list[str] | None = None) -> int:
+    import os
+    from concurrent.futures import ProcessPoolExecutor
+
     parser = argparse.ArgumentParser(prog="weaklink-benchmark")
     parser.add_argument("--trials", type=int, default=5)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--bauds",
+        type=str,
+        default=",".join(str(b) for b in BAUDS),
+        help="Comma-separated list of baud rates to sweep. Default: all "
+        "supported. Example: --bauds 300,1200 skips the slow 45-baud rows.",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=max(1, (os.cpu_count() or 4) - 2),
+        help="Parallel worker processes. Configs are independent so this "
+        "scales roughly linearly with core count (minus BLAS overhead). "
+        "Default: (num_cores - 2), one workload per core with headroom.",
+    )
     parser.add_argument(
         "--readme",
         type=Path,
@@ -233,23 +274,30 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    configs = _enumerate_configs()
-    print(f"Sweeping {len(configs)} configs with {args.trials} trials/point.\n")
-    results: list[Result] = []
+    selected_bauds = {int(b) for b in args.bauds.split(",") if b.strip()}
+    configs = [c for c in _enumerate_configs() if c.baud in selected_bauds]
+    if not configs:
+        print(f"no configs match --bauds {args.bauds!r}")
+        return 1
+
+    print(
+        f"Sweeping {len(configs)} configs with {args.trials} trials/point "
+        f"across {args.workers} worker(s).\n"
+    )
     started = time.perf_counter()
-    for config in configs:
-        row_start = time.perf_counter()
-        payload = _random_payload(config.payload_bytes)
-        result = _find_cliff(config, trials=args.trials, payload=payload)
-        elapsed = time.perf_counter() - row_start
-        cliff = f"{result.cliff_snr_db:+.0f} dB" if result.cliff_snr_db is not None else "no decode"
-        print(
-            f"[{elapsed:5.1f}s] baud={config.baud:>4} {config.rs_label():>13} "
-            f"repeats={config.block_repeats}x  duration={result.duration_seconds:6.1f}s  "
-            f"info={result.info_rate_bit_per_s:7.1f} bit/s  cliff={cliff:>9s}  "
-            f"shannon={result.shannon_snr_db:+.1f} dB"
-        )
-        results.append(result)
+    results: list[Result] = [None] * len(configs)  # type: ignore[list-item]
+    bundles = [(c, args.trials) for c in configs]
+    if args.workers <= 1:
+        # Sequential path for debugging / single-core boxes.
+        for i, bundle in enumerate(bundles):
+            row_start = time.perf_counter()
+            results[i] = _run_one(bundle)
+            _print_row(bundle[0], results[i], time.perf_counter() - row_start)
+    else:
+        with ProcessPoolExecutor(max_workers=args.workers) as pool:
+            for i, result in enumerate(pool.map(_run_one, bundles)):
+                results[i] = result
+                _print_row(configs[i], result, None)
     total = time.perf_counter() - started
     print(f"\nTotal: {total:.1f}s\n")
 
