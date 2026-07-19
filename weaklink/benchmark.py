@@ -33,7 +33,7 @@ README_END_MARKER = "<!-- BENCHMARK RESULTS END -->"
 
 PAYLOAD_BYTES: int = 100
 PAYLOAD_SEED: int = 0
-BAUDS: tuple[int, ...] = (45, 100, 300, 1200)
+BAUDS: tuple[int, ...] = (45, 300, 1200)
 RS_CONFIGS: tuple[tuple[int, int], ...] = ((16, 8), (32, 8), (128, 32))
 BLOCK_REPEATS: tuple[int, ...] = (1, 2, 4, 8)
 SYNC_EVERY_FIXED: int = 4
@@ -184,8 +184,8 @@ def format_table(results: list[Result]) -> str:
         f"Streaming modem. Payload: {PAYLOAD_BYTES} random-ASCII bytes. Sync every "
         f"{SYNC_EVERY_FIXED} data blocks. Reference bandwidth: 3 kHz.",
         "",
-        "| CLI (both tx / rx) | Throughput | Info rate | Our cliff |",
-        "|---|---|---:|---:|",
+        "| Baud | CLI (both tx / rx) | Throughput | Info rate | Our cliff |",
+        "|---:|---|---|---:|---:|",
     ]
     rows = []
     for r in results:
@@ -194,22 +194,18 @@ def format_table(results: list[Result]) -> str:
         if r.config.note:
             throughput = f"{throughput}<br/><sub>{r.config.note}</sub>"
         rows.append(
-            f"| {_cli_snippet(r.config)} | {throughput} | "
+            f"| {r.config.baud} | {_cli_snippet(r.config)} | {throughput} | "
             f"{r.info_rate_bit_per_s:.1f} bit/s | {cliff_text} |"
         )
 
-    # Second table: theoretical Shannon limit vs measured cliff. Same
-    # rows, aligned by CLI, but only the "how far above Shannon are we"
-    # numbers -- clean separation so the actionable table above stays
-    # narrow.
     shannon_header = [
         "",
         "### Shannon limit vs our cliff",
         "",
         "How far above the theoretical lower bound each config sits.",
         "",
-        "| CLI (both tx / rx) | Shannon | Our cliff | Gap |",
-        "|---|---:|---:|---:|",
+        "| Baud | CLI (both tx / rx) | Shannon | Our cliff | Gap |",
+        "|---:|---|---:|---:|---:|",
     ]
     shannon_rows = []
     for r in results:
@@ -220,7 +216,7 @@ def format_table(results: list[Result]) -> str:
             else "n/a"
         )
         shannon_rows.append(
-            f"| {_cli_snippet(r.config)} | {r.shannon_snr_db:+.1f} dB | "
+            f"| {r.config.baud} | {_cli_snippet(r.config)} | {r.shannon_snr_db:+.1f} dB | "
             f"{cliff_text} | {gap_text} |"
         )
     return "\n".join(header + rows + shannon_header + shannon_rows)
