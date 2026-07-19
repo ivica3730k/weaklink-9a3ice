@@ -153,18 +153,20 @@ def _enumerate_configs() -> list[Config]:
                         block_repeats=block_repeats,
                     )
                 )
-    # Notable single-config rows below the main grid.
-    for block_repeats in (1, 2, 4, 8):
-        configs.append(
-            Config(
-                baud=9,
-                rs_data=16,
-                rs_parity=8,
-                block_repeats=block_repeats,
-                payload_bytes=20,
-                note=f"9 baud floor, 20-byte payload, {block_repeats}x repeat",
-            )
+    # 9-baud floor row: the preset config only (R=8). Other R values
+    # take hours to sweep at this baud and don't add insight -- 9 baud's
+    # whole point is deep-noise operation via LLR combining across many
+    # copies, which is exactly what R=8 does.
+    configs.append(
+        Config(
+            baud=9,
+            rs_data=16,
+            rs_parity=8,
+            block_repeats=8,
+            payload_bytes=20,
+            note="9 baud preset (R=8), 20-byte payload",
         )
+    )
     return configs
 
 
@@ -173,17 +175,12 @@ def format_table(results: list[Result]) -> str:
         f"Streaming modem. Payload: {PAYLOAD_BYTES} random-ASCII bytes. Sync every "
         f"{SYNC_EVERY_FIXED} data blocks. Reference bandwidth: 3 kHz.",
         "",
-        "| CLI (both tx / rx) | Block layout (wire / data / parity, +4 B CRC) | Throughput | Info rate | Our cliff | Shannon | Gap |",
-        "|---|---|---|---:|---:|---:|---:|",
+        "| CLI (both tx / rx) | Throughput | Info rate | Our cliff |",
+        "|---|---|---:|---:|",
     ]
     rows = []
     for r in results:
         cliff_text = f"**{r.cliff_snr_db:+.0f} dB**" if r.cliff_snr_db is not None else "not reached"
-        gap_text = (
-            f"{r.cliff_snr_db - r.shannon_snr_db:.1f} dB"
-            if r.cliff_snr_db is not None
-            else "n/a"
-        )
         throughput = f"{r.config.payload_bytes} chars in {r.duration_seconds:.1f} s"
         if r.config.note:
             throughput = f"{throughput}<br/><sub>{r.config.note}</sub>"
@@ -194,9 +191,7 @@ def format_table(results: list[Result]) -> str:
             f"--modem-block-repeats {r.config.block_repeats}`"
         )
         rows.append(
-            f"| {cli} | {r.config.rs_label()} | "
-            f"{throughput} | {r.info_rate_bit_per_s:.1f} bit/s | {cliff_text} | "
-            f"{r.shannon_snr_db:+.1f} dB | {gap_text} |"
+            f"| {cli} | {throughput} | {r.info_rate_bit_per_s:.1f} bit/s | {cliff_text} |"
         )
     return "\n".join(header + rows)
 
