@@ -62,11 +62,16 @@ Both sides must use the same `--modem-baud` (no handshake).
 Three baud rates. Every preset carries a 13 B payload per RS block
 (RS(16,8) + CRC-32), so message sizes below map identically across bauds.
 
-| Baud | CLI (both tx / rx) | 4-FSK tones (Hz) | Bandwidth | Default repeats | Measured best SNR (3 kHz ref) | Min live tx (13 B payload) |
+| Baud | CLI (both tx / rx) | 4-FSK tones (Hz) | Bandwidth | Default repeats | Measured best SNR | Min live tx (13 B payload) |
 |---:|---|---|---:|---:|---:|---:|
 | 45 | `--modem-baud 45` | 1200 / 1400 / 1600 / 1800 | 600 Hz | 4× | ≈ −14 dB | 28 s |
 | 300 | `--modem-baud 300` | 1050 / 1350 / 1650 / 1950 | 900 Hz | 2× | ≈ −5 dB | 2.4 s |
 | 1200 | `--modem-baud 1200` | 500 / 1700 / 2900 / 4100 | 3600 Hz | 2× | ≈ +2 dB | 1.0 s |
+
+SNR numbers are measured with the benchmark's AWGN normalised to a 3 kHz
+reference band — a comparison convention across bauds, not a claim about
+what a physical 3 kHz filter would see (matters mainly for the 1200-baud
+row, whose signal is wider than 3 kHz).
 
 - **1200** — clean local audio, ~500 bit/s.
 - **300** — moderate noise, ~130 bit/s.
