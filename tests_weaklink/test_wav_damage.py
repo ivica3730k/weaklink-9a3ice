@@ -82,10 +82,8 @@ def _apply_awgn(buf: np.ndarray, snr_db: float, seed: int) -> np.ndarray:
 CASES: list[tuple[int, bytes, str, "callable"]] = []  # noqa: F821
 
 # Clean baseline for every baud+payload -- catches encode/decode regressions.
-for baud in (9, 45, 300, 1200):
+for baud in (45, 300, 1200):
     for payload in (PAYLOAD_1B, PAYLOAD_10B):
-        if baud == 9 and payload == PAYLOAD_10B:
-            continue  # ~4 min encode; single-char covers 9-baud
         CASES.append((baud, payload, "clean", lambda a, sr: a))
 
 # Head chop: RX started late. Decoder projects a virtual leading
@@ -156,13 +154,10 @@ def test_decode_survives_wav_damage(baud: int, payload: bytes, damage: str, dama
 from ._streaming import pump_decode
 
 
-_STREAMING_CASES = [c for c in CASES if c[0] != 9]  # 9 baud is CI-hostile
-
-
 @pytest.mark.parametrize(
     "baud, payload, damage, damage_fn",
-    _STREAMING_CASES,
-    ids=[f"{c[0]}baud_{len(c[1])}b_{c[2]}" for c in _STREAMING_CASES],
+    CASES,
+    ids=[f"{c[0]}baud_{len(c[1])}b_{c[2]}" for c in CASES],
 )
 def test_decode_survives_wav_damage_e2e_streaming(
     baud: int, payload: bytes, damage: str, damage_fn,

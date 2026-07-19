@@ -153,29 +153,16 @@ def _enumerate_configs() -> list[Config]:
                         block_repeats=block_repeats,
                     )
                 )
-    # 9-baud floor row: the preset config only (R=8). Other R values
-    # take hours to sweep at this baud and don't add insight -- 9 baud's
-    # whole point is deep-noise operation via LLR combining across many
-    # copies, which is exactly what R=8 does.
-    configs.append(
-        Config(
-            baud=9,
-            rs_data=16,
-            rs_parity=8,
-            block_repeats=8,
-            payload_bytes=20,
-            note="9 baud preset (R=8), 20-byte payload",
-        )
-    )
     return configs
 
 
 def _cli_snippet(cfg: Config) -> str:
+    """One `--modem-*` per line so the table cell stays narrow."""
     return (
-        f"`--modem-baud {cfg.baud} "
-        f"--modem-rs-data-bytes {cfg.rs_data} "
-        f"--modem-rs-parity-bytes {cfg.rs_parity} "
-        f"--modem-block-repeats {cfg.block_repeats}`"
+        f"`--modem-baud {cfg.baud}`<br/>"
+        f"`--modem-rs-data-bytes {cfg.rs_data}`<br/>"
+        f"`--modem-rs-parity-bytes {cfg.rs_parity}`<br/>"
+        f"`--modem-block-repeats {cfg.block_repeats}`"
     )
 
 
@@ -184,7 +171,7 @@ def format_table(results: list[Result]) -> str:
         f"Streaming modem. Payload: {PAYLOAD_BYTES} random-ASCII bytes. Sync every "
         f"{SYNC_EVERY_FIXED} data blocks. Reference bandwidth: 3 kHz.",
         "",
-        "| Baud | CLI (both tx / rx) | Throughput | Info rate | Our cliff |",
+        "| Baud | CLI (both tx / rx) | Throughput | Info rate | Measured best SNR |",
         "|---:|---|---|---:|---:|",
     ]
     rows = []
@@ -200,11 +187,11 @@ def format_table(results: list[Result]) -> str:
 
     shannon_header = [
         "",
-        "### Shannon limit vs our cliff",
+        "### Shannon limit vs measured best SNR",
         "",
         "How far above the theoretical lower bound each config sits.",
         "",
-        "| Baud | CLI (both tx / rx) | Shannon | Our cliff | Gap |",
+        "| Baud | CLI (both tx / rx) | Shannon | Measured best SNR | Gap |",
         "|---:|---|---:|---:|---:|",
     ]
     shannon_rows = []
