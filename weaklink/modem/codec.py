@@ -700,12 +700,14 @@ def _find_preamble_peaks(
     peak_score = float(scores.max())
 
     # Robust noise floor from a lower quantile of the score distribution.
-    # For M-FSK, partial preamble matches at nearby offsets pull the
-    # median up in proportion to 1/M. Match the quantile to M so the
-    # "noise floor" region excludes near-match contamination.
-    #   M=2 -> Q0.25, M=4 -> Q0.5 (lower half), M=8 -> Q0.75.
+    # For M-FSK, partial preamble matches near the true alignment pull the
+    # score distribution up in proportion to 1/M -- the noise-only region
+    # is roughly the bottom (2/M) of scores. Match the quantile to M so
+    # the "noise pool" excludes near-match contamination cleanly.
+    #   M=2 -> Q0.25, M=4 -> Q0.5, M=8 -> Q0.75, M=16 -> Q0.875,
+    #   M=32 -> Q0.9375, M=64 -> Q0.96875.
     num_tones = magnitudes.shape[1]
-    q = min(0.75, 0.125 * num_tones)
+    q = max(0.25, 1.0 - 2.0 / num_tones)
     boundary = float(np.quantile(scores, q))
     noise_pool = scores[scores <= boundary]
     if noise_pool.size < 4:

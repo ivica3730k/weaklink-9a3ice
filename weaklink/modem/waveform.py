@@ -78,6 +78,13 @@ class WaveformConfig:
         object.__setattr__(self, "tones_hz", tones)
         if self.samples_per_symbol < 8:
             raise ValueError("sample_rate / baud must be >= 8 samples per symbol")
+        nyquist = self.sample_rate / 2.0
+        if max(tones) >= nyquist:
+            raise ValueError(
+                f"top tone {max(tones):.0f} Hz exceeds Nyquist ({nyquist:.0f} Hz) -- "
+                f"num_tones={self.num_tones} at {self.baud} baud needs more bandwidth "
+                f"than the sample rate provides"
+            )
 
     @property
     def samples_per_symbol(self) -> int:
