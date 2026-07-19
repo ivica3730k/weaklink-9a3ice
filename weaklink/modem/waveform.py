@@ -22,7 +22,13 @@ _UNIFORM_4_MEAN: float = sum(UNIFORM_4_OFFSETS) / len(UNIFORM_4_OFFSETS)
 @dataclass(frozen=True)
 class WaveformConfig:
     baud: float = 300.0
-    sample_rate: float = 48_000.0
+    sample_rate: float = 18_000.0
+    """Internal working rate. 18 kHz = 5 * LCM(45, 300, 1200), so
+    samples_per_symbol comes out integer at every preset (400 / 60 /
+    15) -- no rounding drift accumulating over long messages. Nyquist
+    9 kHz > 4.1 kHz max tone with ~4.4 samples per cycle at the top
+    tone. ~2.7x fewer samples than 48 kHz baseline for every DSP
+    stage."""
     center_hz: float = 1_500.0
     """Centre of the 4-tone stack in the audio passband."""
     tone_spacing_hz: float = 300.0

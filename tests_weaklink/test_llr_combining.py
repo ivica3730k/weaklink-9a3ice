@@ -27,11 +27,11 @@ def _cfg(block_repeats: int) -> ModemConfig:
     )
 
 
-def _awgn(audio: np.ndarray, snr_db: float, seed: int) -> np.ndarray:
+def _awgn(audio: np.ndarray, snr_db: float, seed: int, sample_rate: float = 18_000.0) -> np.ndarray:
     sig_p = float(np.mean(audio.astype(np.float64) ** 2))
-    noise_p = sig_p * 10 ** (-snr_db / 10.0)
+    noise_variance = sig_p * sample_rate / (2.0 * 3000.0) / (10 ** (snr_db / 10.0))
     rng = np.random.default_rng(seed)
-    return (audio + rng.standard_normal(audio.size).astype(np.float32) * np.sqrt(noise_p)).astype(np.float32)
+    return (audio + rng.standard_normal(audio.size).astype(np.float32) * np.sqrt(noise_variance)).astype(np.float32)
 
 
 @pytest.mark.parametrize("block_repeats", [2, 4])
