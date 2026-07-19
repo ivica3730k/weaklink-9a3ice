@@ -216,9 +216,9 @@ between preambles — one rx pipe can watch many tx sessions in a row.
 ```
 One tx session (live audio):
 
-  ┌────────┬─────┬───────┬─────┬───────┬─────┬─────┬───────┬─────┬────────┐
-  │ pilot  │ pre │slot 0 │ pre │slot 1 │ pre │ ... │slot N-1│ pre │ pilot  │
-  └────────┴─────┴───────┴─────┴───────┴─────┴─────┴───────┴─────┴────────┘
+  ┌────────┬─────┬────────┬─────┬────────┬─────┬─────┬────────┬─────┬────────┐
+  │ pilot  │ pre │ slot 0 │ pre │ slot 1 │ pre │ ... │slot N-1│ pre │ pilot  │
+  └────────┴─────┴────────┴─────┴────────┴─────┴─────┴────────┴─────┴────────┘
 
 One RS block, data area (before conv + interleave + FSK):
 
