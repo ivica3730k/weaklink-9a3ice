@@ -114,6 +114,18 @@ Streaming modem. Payload: 100 random-ASCII bytes. Sync every 4 data blocks. Refe
 
 | Baud | CLI (both tx / rx) | Throughput | Info rate | Measured best SNR |
 |---:|---|---|---:|---:|
+| 45 | `--modem-baud 45`<br/>`--modem-rs-data-bytes 16`<br/>`--modem-rs-parity-bytes 8`<br/>`--modem-block-repeats 1` | 100 chars in 51.9 s | 15.4 bit/s | **-12 dB** |
+| 45 | `--modem-baud 45`<br/>`--modem-rs-data-bytes 16`<br/>`--modem-rs-parity-bytes 8`<br/>`--modem-block-repeats 2` | 100 chars in 103.1 s | 7.8 bit/s | **-13 dB** |
+| 45 | `--modem-baud 45`<br/>`--modem-rs-data-bytes 16`<br/>`--modem-rs-parity-bytes 8`<br/>`--modem-block-repeats 4` | 100 chars in 205.6 s | 3.9 bit/s | **-13 dB** |
+| 45 | `--modem-baud 45`<br/>`--modem-rs-data-bytes 16`<br/>`--modem-rs-parity-bytes 8`<br/>`--modem-block-repeats 8` | 100 chars in 410.4 s | 1.9 bit/s | **-12 dB** |
+| 45 | `--modem-baud 45`<br/>`--modem-rs-data-bytes 32`<br/>`--modem-rs-parity-bytes 8`<br/>`--modem-block-repeats 1` | 100 chars in 37.7 s | 21.2 bit/s | **-12 dB** |
+| 45 | `--modem-baud 45`<br/>`--modem-rs-data-bytes 32`<br/>`--modem-rs-parity-bytes 8`<br/>`--modem-block-repeats 2` | 100 chars in 74.7 s | 10.7 bit/s | **-13 dB** |
+| 45 | `--modem-baud 45`<br/>`--modem-rs-data-bytes 32`<br/>`--modem-rs-parity-bytes 8`<br/>`--modem-block-repeats 4` | 100 chars in 148.7 s | 5.4 bit/s | **-13 dB** |
+| 45 | `--modem-baud 45`<br/>`--modem-rs-data-bytes 32`<br/>`--modem-rs-parity-bytes 8`<br/>`--modem-block-repeats 8` | 100 chars in 296.6 s | 2.7 bit/s | **-13 dB** |
+| 45 | `--modem-baud 45`<br/>`--modem-rs-data-bytes 128`<br/>`--modem-rs-parity-bytes 32`<br/>`--modem-block-repeats 1` | 100 chars in 32.7 s | 24.4 bit/s | **-13 dB** |
+| 45 | `--modem-baud 45`<br/>`--modem-rs-data-bytes 128`<br/>`--modem-rs-parity-bytes 32`<br/>`--modem-block-repeats 2` | 100 chars in 64.7 s | 12.4 bit/s | **-13 dB** |
+| 45 | `--modem-baud 45`<br/>`--modem-rs-data-bytes 128`<br/>`--modem-rs-parity-bytes 32`<br/>`--modem-block-repeats 4` | 100 chars in 128.8 s | 6.2 bit/s | **-14 dB** |
+| 45 | `--modem-baud 45`<br/>`--modem-rs-data-bytes 128`<br/>`--modem-rs-parity-bytes 32`<br/>`--modem-block-repeats 8` | 100 chars in 256.8 s | 3.1 bit/s | **-14 dB** |
 | 300 | `--modem-baud 300`<br/>`--modem-rs-data-bytes 16`<br/>`--modem-rs-parity-bytes 8`<br/>`--modem-block-repeats 1` | 100 chars in 7.8 s | 102.7 bit/s | **-3 dB** |
 | 300 | `--modem-baud 300`<br/>`--modem-rs-data-bytes 16`<br/>`--modem-rs-parity-bytes 8`<br/>`--modem-block-repeats 2` | 100 chars in 15.5 s | 51.7 bit/s | **-4 dB** |
 | 300 | `--modem-baud 300`<br/>`--modem-rs-data-bytes 16`<br/>`--modem-rs-parity-bytes 8`<br/>`--modem-block-repeats 4` | 100 chars in 30.8 s | 26.0 bit/s | **-5 dB** |
@@ -145,6 +157,18 @@ How far above the theoretical lower bound each config sits.
 
 | Baud | CLI (both tx / rx) | Shannon | Measured best SNR | Gap |
 |---:|---|---:|---:|---:|
+| 45 | `--modem-baud 45`<br/>`--modem-rs-data-bytes 16`<br/>`--modem-rs-parity-bytes 8`<br/>`--modem-block-repeats 1` | -24.5 dB | **-12 dB** | 12.5 dB |
+| 45 | `--modem-baud 45`<br/>`--modem-rs-data-bytes 16`<br/>`--modem-rs-parity-bytes 8`<br/>`--modem-block-repeats 2` | -27.5 dB | **-13 dB** | 14.5 dB |
+| 45 | `--modem-baud 45`<br/>`--modem-rs-data-bytes 16`<br/>`--modem-rs-parity-bytes 8`<br/>`--modem-block-repeats 4` | -30.5 dB | **-13 dB** | 17.5 dB |
+| 45 | `--modem-baud 45`<br/>`--modem-rs-data-bytes 16`<br/>`--modem-rs-parity-bytes 8`<br/>`--modem-block-repeats 8` | -33.5 dB | **-12 dB** | 21.5 dB |
+| 45 | `--modem-baud 45`<br/>`--modem-rs-data-bytes 32`<br/>`--modem-rs-parity-bytes 8`<br/>`--modem-block-repeats 1` | -23.1 dB | **-12 dB** | 11.1 dB |
+| 45 | `--modem-baud 45`<br/>`--modem-rs-data-bytes 32`<br/>`--modem-rs-parity-bytes 8`<br/>`--modem-block-repeats 2` | -26.1 dB | **-13 dB** | 13.1 dB |
+| 45 | `--modem-baud 45`<br/>`--modem-rs-data-bytes 32`<br/>`--modem-rs-parity-bytes 8`<br/>`--modem-block-repeats 4` | -29.1 dB | **-13 dB** | 16.1 dB |
+| 45 | `--modem-baud 45`<br/>`--modem-rs-data-bytes 32`<br/>`--modem-rs-parity-bytes 8`<br/>`--modem-block-repeats 8` | -32.1 dB | **-13 dB** | 19.1 dB |
+| 45 | `--modem-baud 45`<br/>`--modem-rs-data-bytes 128`<br/>`--modem-rs-parity-bytes 32`<br/>`--modem-block-repeats 1` | -22.5 dB | **-13 dB** | 9.5 dB |
+| 45 | `--modem-baud 45`<br/>`--modem-rs-data-bytes 128`<br/>`--modem-rs-parity-bytes 32`<br/>`--modem-block-repeats 2` | -25.4 dB | **-13 dB** | 12.4 dB |
+| 45 | `--modem-baud 45`<br/>`--modem-rs-data-bytes 128`<br/>`--modem-rs-parity-bytes 32`<br/>`--modem-block-repeats 4` | -28.4 dB | **-14 dB** | 14.4 dB |
+| 45 | `--modem-baud 45`<br/>`--modem-rs-data-bytes 128`<br/>`--modem-rs-parity-bytes 32`<br/>`--modem-block-repeats 8` | -31.4 dB | **-14 dB** | 17.4 dB |
 | 300 | `--modem-baud 300`<br/>`--modem-rs-data-bytes 16`<br/>`--modem-rs-parity-bytes 8`<br/>`--modem-block-repeats 1` | -16.2 dB | **-3 dB** | 13.2 dB |
 | 300 | `--modem-baud 300`<br/>`--modem-rs-data-bytes 16`<br/>`--modem-rs-parity-bytes 8`<br/>`--modem-block-repeats 2` | -19.2 dB | **-4 dB** | 15.2 dB |
 | 300 | `--modem-baud 300`<br/>`--modem-rs-data-bytes 16`<br/>`--modem-rs-parity-bytes 8`<br/>`--modem-block-repeats 4` | -22.2 dB | **-5 dB** | 17.2 dB |
