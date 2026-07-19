@@ -1,22 +1,44 @@
-"""4-FSK CPFSK modulator + non-coherent soft demodulator.
+"""M-FSK CPFSK modulator + non-coherent soft demodulator.
 
 Continuous-phase for narrow spectrum, non-coherent I/Q magnitudes (~3 dB
 worse than coherent but no carrier recovery). Gray-coded symbols so
 adjacent-tone confusions cost one bit. Max-log-MAP soft output per bit.
+Number of tones is configurable via ``WaveformConfig.num_tones`` -- 4
+(default) or 8 for narrower-bandwidth-per-bit at ~1--2 dB SNR penalty.
 """
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass, field
 
 import numpy as np
 
+# Legacy module-level constants (still exposed for tests / callers that
+# only use 4-FSK). Prefer ``config.num_tones`` / ``config.bits_per_symbol``.
 BITS_PER_SYMBOL = 2
-NUM_TONES = 4  # 2 ** BITS_PER_SYMBOL
+NUM_TONES = 4
 
-# Uniform 4-FSK tone spacing. Total span = 3 * tone_spacing_hz.
-UNIFORM_4_OFFSETS: tuple[float, ...] = (0.0, 1.0, 2.0, 3.0)
-_UNIFORM_4_MEAN: float = sum(UNIFORM_4_OFFSETS) / len(UNIFORM_4_OFFSETS)
+
+@functools.lru_cache(maxsize=8)
+def _gray_tables(num_tones: int) -> tuple[np.ndarray, np.ndarray]:
+    """Binary-to-Gray tables sized for ``num_tones``. ``bits_to_symbol``
+    maps a binary index → its Gray-coded tone index; ``symbol_to_bits``
+    is the inverse."""
+    if num_tones < 2 or (num_tones & (num_tones - 1)) != 0:
+        raise ValueError(f"num_tones must be a power of 2 >= 2, got {num_tones}")
+    bits_per_symbol = num_tones.bit_length() - 1
+    bits_to_symbol = np.empty(num_tones, dtype=np.int8)
+    symbol_to_bits = np.empty((num_tones, bits_per_symbol), dtype=np.int8)
+    for i in range(num_tones):
+        gray = i ^ (i >> 1)
+        bits_to_symbol[i] = gray
+        # ``symbol_to_bits[gray]`` inverts the mapping: given the received
+        # tone ``gray``, recover the original ``i`` -- its bits are what
+        # the transmitter packed. We index by ``gray`` and store bits of ``i``.
+        for b in range(bits_per_symbol):
+            symbol_to_bits[gray, b] = (i >> (bits_per_symbol - 1 - b)) & 1
+    return bits_to_symbol, symbol_to_bits
 
 
 @dataclass(frozen=True)
@@ -27,24 +49,26 @@ class WaveformConfig:
     is integer at every preset -- no rounding drift. Nyquist 9 kHz
     covers the 4.1 kHz top tone with ~4.4 samples per cycle."""
     center_hz: float = 1_500.0
-    """Centre of the 4-tone stack in the audio passband."""
+    """Centre of the tone stack in the audio passband."""
     tone_spacing_hz: float = 300.0
-    """Tone-to-tone spacing. The four tones sit at
-    ``center_hz + (offset - 1.5) * tone_spacing_hz`` for offset in
-    ``{0, 1, 2, 3}``. Total stack span is ``3 * tone_spacing_hz``."""
+    """Tone-to-tone spacing. Total spread = ``(num_tones - 1) * spacing``."""
     amplitude: float = 0.25
     """Peak amplitude, well under 1.0 to leave headroom in WAV / audio devices."""
+    num_tones: int = 4
+    """4 (default) or 8. 8-FSK carries 3 bits/symbol vs 2 for 4-FSK --
+    higher throughput at the same baud, at ~1--2 dB SNR penalty."""
 
     tones_hz: tuple[float, ...] = field(init=False)
 
     MIN_TONE_HZ: float = 500.0
-    """Guardrail: no tone allowed below this frequency. At high baud the
-    default 1500 Hz center would push the lowest tone toward DC. If that would
-    happen, we bump the center up so the lowest tone lands at MIN_TONE_HZ."""
+    """Guardrail: no tone allowed below this frequency."""
 
     def __post_init__(self) -> None:
+        if self.num_tones < 2 or (self.num_tones & (self.num_tones - 1)) != 0:
+            raise ValueError("num_tones must be a power of 2 >= 2")
+        mean_offset = (self.num_tones - 1) / 2.0
         relative_offsets = tuple(
-            (offset - _UNIFORM_4_MEAN) * self.tone_spacing_hz for offset in UNIFORM_4_OFFSETS
+            (i - mean_offset) * self.tone_spacing_hz for i in range(self.num_tones)
         )
         raw_min = self.center_hz + min(relative_offsets)
         if raw_min < self.MIN_TONE_HZ:
@@ -59,27 +83,27 @@ class WaveformConfig:
     def samples_per_symbol(self) -> int:
         return int(round(self.sample_rate / self.baud))
 
-
-# Gray code: symbol index i emits bits GRAY_TO_BITS[i]; a pair of bits
-# (b1, b0) selects tone BITS_TO_GRAY[(b1 << 1) | b0].
-GRAY_TO_BITS: tuple[tuple[int, int], ...] = ((0, 0), (0, 1), (1, 1), (1, 0))
-BITS_TO_GRAY: tuple[int, ...] = (0, 1, 3, 2)
+    @property
+    def bits_per_symbol(self) -> int:
+        return self.num_tones.bit_length() - 1
 
 
-def bits_to_symbols(bits: bytes) -> np.ndarray:
-    """Pack an even-length 0/1 bit stream into 4-FSK symbol indices."""
-    if len(bits) % BITS_PER_SYMBOL != 0:
-        raise ValueError(f"bit count {len(bits)} not a multiple of {BITS_PER_SYMBOL}")
-    packed = np.frombuffer(bits, dtype=np.int8).reshape(-1, BITS_PER_SYMBOL)
-    keys = (packed[:, 0] << 1) | packed[:, 1]
-    lookup = np.asarray(BITS_TO_GRAY, dtype=np.int8)
+def bits_to_symbols(bits: bytes, num_tones: int = NUM_TONES) -> np.ndarray:
+    """Pack a 0/1 bit stream into M-FSK symbol indices."""
+    bits_per_symbol = num_tones.bit_length() - 1
+    if len(bits) % bits_per_symbol != 0:
+        raise ValueError(f"bit count {len(bits)} not a multiple of {bits_per_symbol}")
+    packed = np.frombuffer(bits, dtype=np.int8).reshape(-1, bits_per_symbol)
+    # Big-endian bit packing: bit i contributes (bits_per_symbol - 1 - i).
+    weights = 1 << np.arange(bits_per_symbol - 1, -1, -1, dtype=np.int64)
+    keys = (packed.astype(np.int64) * weights).sum(axis=1)
+    lookup, _ = _gray_tables(num_tones)
     return lookup[keys]
 
 
-def symbols_to_bits(symbols: np.ndarray) -> bytes:
-    lookup = np.asarray(GRAY_TO_BITS, dtype=np.int8)
-    bit_pairs = lookup[symbols]
-    return bytes(bit_pairs.reshape(-1).tolist())
+def symbols_to_bits(symbols: np.ndarray, num_tones: int = NUM_TONES) -> bytes:
+    _, symbol_to_bits = _gray_tables(num_tones)
+    return bytes(symbol_to_bits[symbols].reshape(-1).tolist())
 
 
 def modulate(symbols: np.ndarray, config: WaveformConfig) -> np.ndarray:
@@ -104,21 +128,17 @@ def modulate(symbols: np.ndarray, config: WaveformConfig) -> np.ndarray:
 
 
 def demodulate_soft(samples: np.ndarray, config: WaveformConfig, *, frequency_offset_hz: float = 0.0) -> np.ndarray:
-    """Non-coherent demod. Returns an ``(N, 4)`` array of squared magnitudes,
-    one row per symbol, one column per tone.
-
-    ``frequency_offset_hz`` shifts the reference tones — pass the estimate from
-    :func:`estimate_frequency_offset` when TX and RX radios have imperfect LOs.
-    """
+    """Non-coherent demod. Returns ``(N, num_tones)`` squared magnitudes.
+    ``frequency_offset_hz`` shifts the reference tones."""
     samples_per_symbol = config.samples_per_symbol
     num_symbols = len(samples) // samples_per_symbol
     if num_symbols == 0:
-        return np.zeros((0, NUM_TONES), dtype=np.float64)
+        return np.zeros((0, config.num_tones), dtype=np.float64)
     trimmed = np.asarray(samples[: num_symbols * samples_per_symbol], dtype=np.float64)
     windowed = trimmed.reshape(num_symbols, samples_per_symbol)
 
     time_axis = np.arange(samples_per_symbol) / config.sample_rate
-    magnitudes_sq = np.empty((num_symbols, NUM_TONES), dtype=np.float64)
+    magnitudes_sq = np.empty((num_symbols, config.num_tones), dtype=np.float64)
     for tone_index, freq in enumerate(config.tones_hz):
         adjusted_freq = freq + frequency_offset_hz
         cos_wave = np.cos(2.0 * np.pi * adjusted_freq * time_axis)
@@ -214,22 +234,20 @@ def estimate_frequency_offset(
     return best_offset
 
 
-def soft_bits_from_magnitudes(magnitudes_sq: np.ndarray) -> np.ndarray:
+def soft_bits_from_magnitudes(magnitudes_sq: np.ndarray, num_tones: int = NUM_TONES) -> np.ndarray:
     """Turn per-symbol tone magnitudes into per-bit soft LLR-shaped values.
 
-    Returns a 1-D array of length ``2 * num_symbols``, ordered ``[b1_0, b0_0, b1_1, b0_1, ...]``.
-
-    Positive value → bit is more likely 0; negative → more likely 1. Magnitudes
-    are unbounded; the Viterbi decoder scales them internally.
+    Returns a 1-D array of length ``bits_per_symbol * num_symbols``.
+    Positive → bit is more likely 0; negative → more likely 1.
     """
     num_symbols = magnitudes_sq.shape[0]
     if num_symbols == 0:
         return np.zeros(0, dtype=np.float64)
 
-    # Max-log-MAP per bit: LLR ≈ max(0-symbol likelihood) - max(1-symbol).
-    bit_masks = np.asarray(GRAY_TO_BITS, dtype=np.int8)  # shape (4, 2)
-    llrs = np.empty((num_symbols, BITS_PER_SYMBOL), dtype=np.float64)
-    for bit_position in range(BITS_PER_SYMBOL):
+    _, bit_masks = _gray_tables(num_tones)  # (num_tones, bits_per_symbol)
+    bits_per_symbol = num_tones.bit_length() - 1
+    llrs = np.empty((num_symbols, bits_per_symbol), dtype=np.float64)
+    for bit_position in range(bits_per_symbol):
         zero_symbols = np.where(bit_masks[:, bit_position] == 0)[0]
         one_symbols = np.where(bit_masks[:, bit_position] == 1)[0]
         max_zero = magnitudes_sq[:, zero_symbols].max(axis=1)

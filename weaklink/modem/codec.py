@@ -51,26 +51,36 @@ def _cached_rs_codec(
 PREAMBLE_LENGTH_SYMBOLS: int = 32
 
 
-def _generate_preamble(length: int, seed: int = 0xC05A) -> tuple[int, ...]:
-    """Deterministic 4-ary PN sequence. Same LFSR as the pre-streaming codec."""
+def _generate_preamble(length: int, num_tones: int = 4, seed: int = 0xC05A) -> tuple[int, ...]:
+    """Deterministic PN sequence over ``num_tones``. Same LFSR at every M;
+    just consumes ``log2(num_tones)`` bits per symbol."""
+    bits_per_symbol = num_tones.bit_length() - 1
+    mask = num_tones - 1
     state = seed & 0xFFFF
     if state == 0:
         state = 1
     symbols: list[int] = []
     for _ in range(length):
-        pair = 0
-        for _ in range(2):
+        acc = 0
+        for _ in range(bits_per_symbol):
             bit = state & 1
             feedback = ((state >> 15) ^ (state >> 13) ^ (state >> 12) ^ (state >> 10)) & 1
             state = ((state >> 1) | (feedback << 15)) & 0xFFFF
-            pair = (pair << 1) | bit
-        symbols.append(pair & 0x3)
+            acc = (acc << 1) | bit
+        symbols.append(acc & mask)
     return tuple(symbols)
 
 
-PREAMBLE_SYMBOLS: np.ndarray = np.asarray(
-    _generate_preamble(PREAMBLE_LENGTH_SYMBOLS), dtype=np.int8
-)
+@functools.lru_cache(maxsize=8)
+def _preamble_for(num_tones: int) -> np.ndarray:
+    return np.asarray(
+        _generate_preamble(PREAMBLE_LENGTH_SYMBOLS, num_tones=num_tones), dtype=np.int8,
+    )
+
+
+# 4-FSK preamble kept as a module constant so tests importing it directly
+# still work; use ``_preamble_for(num_tones)`` in encode / decode paths.
+PREAMBLE_SYMBOLS: np.ndarray = _preamble_for(4)
 
 
 @dataclass(frozen=True)
@@ -126,22 +136,24 @@ def _pad_zeros(
 
 
 def _block_symbol_length(config: ModemConfig) -> int:
+    bps = config.waveform.bits_per_symbol
     codec = config.rs_codec()
     info_bits = codec.config.block_size * 8
     coded_bits = 2 * (info_bits + fec.CONSTRAINT_LENGTH - 1)
     interleaved = _round_up_multiple(coded_bits, config.interleaver.block_size)
-    padded = _round_up_multiple(interleaved, BITS_PER_SYMBOL)
-    return padded // BITS_PER_SYMBOL
+    padded = _round_up_multiple(interleaved, bps)
+    return padded // bps
 
 
 def _encode_one_block(payload: bytes, config: ModemConfig, seed_slot: int) -> np.ndarray:
+    bps = config.waveform.bits_per_symbol
     codec = config.rs_codec()
     rs_encoded = codec.encode(payload)
     payload_bits = _bytes_to_bits_msb(rs_encoded)
     coded = fec.encode(payload_bits)
     interleaved = interleave(coded, config.interleaver, block_index=seed_slot)
-    padded = _pad_to_multiple(interleaved, BITS_PER_SYMBOL)
-    return bits_to_symbols(padded)
+    padded = _pad_to_multiple(interleaved, bps)
+    return bits_to_symbols(padded, num_tones=config.waveform.num_tones)
 
 
 def _copy_seed_slot(block_index: int, copy_index: int, block_repeats: int) -> int:
@@ -204,15 +216,16 @@ def encode_stream(
     data_bytes = codec.config.data_bytes
     _validate_data_bytes(data_bytes)
     payload_per_block = data_bytes - _HEADER_BYTES
+    preamble = _preamble_for(config.waveform.num_tones)
 
-    pre_audio = modulate(PREAMBLE_SYMBOLS, config.waveform)
+    pre_audio = modulate(preamble, config.waveform)
 
     def emit_block(chunk_bytes: bytes, block_index: int) -> "Iterator[np.ndarray]":
         framed = _frame_block(chunk_bytes, block_index, payload_per_block)
         for copy_index in range(config.block_repeats):
             seed = _copy_seed_slot(block_index, copy_index, config.block_repeats)
             block_symbols = _encode_one_block(framed, config, seed_slot=seed)
-            merged = np.concatenate([PREAMBLE_SYMBOLS, block_symbols])
+            merged = np.concatenate([preamble, block_symbols])
             yield modulate(merged, config.waveform)
 
     buffer = bytearray()
@@ -315,7 +328,7 @@ def decode(
         _log.debug("demodulator returned no symbols; sample count below one symbol")
         return (b"", 0) if streaming else b""
 
-    preamble = PREAMBLE_SYMBOLS
+    preamble = _preamble_for(config.waveform.num_tones)
     peaks = _find_preamble_peaks(coarse_magnitudes, preamble, config)
     _log.debug("preamble peaks found: %d at symbol offsets %s", len(peaks), peaks[:8])
     if not peaks:
@@ -492,7 +505,7 @@ def decode(
             slot_mags = coarse_magnitudes[slot_start : slot_start + block_length]
         if slot_mags.shape[0] >= block_length:
             slot_attempted += 1
-            soft = soft_bits_from_magnitudes(slot_mags)
+            soft = soft_bits_from_magnitudes(slot_mags, num_tones=config.waveform.num_tones)
             decoded, errors_corrected, found_seed_slot = _decode_slot_with_seed_search(
                 soft, config, codec, expected_block_index
             )
@@ -672,12 +685,13 @@ def _find_preamble_peaks(
     # ``wanted[offset]`` = Σ_i magnitudes[offset + i, preamble[i]].
     wanted = np.zeros(max_offset + 1, dtype=np.float64)
     preamble_int = preamble.astype(np.int64)
-    for tone in range(NUM_TONES):
+    num_tones = magnitudes.shape[1]
+    for tone in range(num_tones):
         mask = (preamble_int == tone).astype(np.float64)
         if mask.any():
             wanted += np.correlate(magnitudes[:, tone], mask, mode="valid")
-    # Old inner-loop math simplifies to: raw = (4*wanted - total) / 3.
-    raw = (NUM_TONES * wanted - windowed_total) / (NUM_TONES - 1)
+    # Old inner-loop math simplifies to: raw = (M * wanted - total) / (M - 1).
+    raw = (num_tones * wanted - windowed_total) / (num_tones - 1)
     with np.errstate(divide="ignore", invalid="ignore"):
         scores = np.where(windowed_total > 1e-12, raw / windowed_total, 0.0)
 
@@ -685,17 +699,19 @@ def _find_preamble_peaks(
         return []
     peak_score = float(scores.max())
 
-    # Robust noise floor from the lower half -- real preambles + their PN
-    # autocorrelation sidelobes live in the upper half of scores; anything
-    # <= the overall median is approximately noise-only.
-    overall_median = float(np.median(scores))
-    lower_half = scores[scores <= overall_median]
-    if lower_half.size < 4:
+    # Robust noise floor from a lower quantile of the score distribution.
+    # For M-FSK, partial preamble matches at nearby offsets pull the
+    # median up in proportion to 1/M. Match the quantile to M so the
+    # "noise floor" region excludes near-match contamination.
+    #   M=2 -> Q0.25, M=4 -> Q0.5 (lower half), M=8 -> Q0.75.
+    num_tones = magnitudes.shape[1]
+    q = min(0.75, 0.125 * num_tones)
+    boundary = float(np.quantile(scores, q))
+    noise_pool = scores[scores <= boundary]
+    if noise_pool.size < 4:
         return []
-    noise_centre = float(np.median(lower_half))
-    noise_mad = float(np.median(np.abs(lower_half - noise_centre)))
-    # MAD -> gaussian sigma. 2.0x factor because half-distribution MAD
-    # underestimates the full σ.
+    noise_centre = float(np.median(noise_pool))
+    noise_mad = float(np.median(np.abs(noise_pool - noise_centre)))
     noise_sigma = max(2.0 * 1.4826 * noise_mad, 1e-9)
 
     if peak_score < noise_centre + 6.0 * noise_sigma:
