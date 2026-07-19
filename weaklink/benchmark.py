@@ -170,6 +170,15 @@ def _enumerate_configs() -> list[Config]:
     return configs
 
 
+def _cli_snippet(cfg: Config) -> str:
+    return (
+        f"`--modem-baud {cfg.baud} "
+        f"--modem-rs-data-bytes {cfg.rs_data} "
+        f"--modem-rs-parity-bytes {cfg.rs_parity} "
+        f"--modem-block-repeats {cfg.block_repeats}`"
+    )
+
+
 def format_table(results: list[Result]) -> str:
     header = [
         f"Streaming modem. Payload: {PAYLOAD_BYTES} random-ASCII bytes. Sync every "
@@ -184,16 +193,37 @@ def format_table(results: list[Result]) -> str:
         throughput = f"{r.config.payload_bytes} chars in {r.duration_seconds:.1f} s"
         if r.config.note:
             throughput = f"{throughput}<br/><sub>{r.config.note}</sub>"
-        cli = (
-            f"`--modem-baud {r.config.baud} "
-            f"--modem-rs-data-bytes {r.config.rs_data} "
-            f"--modem-rs-parity-bytes {r.config.rs_parity} "
-            f"--modem-block-repeats {r.config.block_repeats}`"
-        )
         rows.append(
-            f"| {cli} | {throughput} | {r.info_rate_bit_per_s:.1f} bit/s | {cliff_text} |"
+            f"| {_cli_snippet(r.config)} | {throughput} | "
+            f"{r.info_rate_bit_per_s:.1f} bit/s | {cliff_text} |"
         )
-    return "\n".join(header + rows)
+
+    # Second table: theoretical Shannon limit vs measured cliff. Same
+    # rows, aligned by CLI, but only the "how far above Shannon are we"
+    # numbers -- clean separation so the actionable table above stays
+    # narrow.
+    shannon_header = [
+        "",
+        "### Shannon limit vs our cliff",
+        "",
+        "How far above the theoretical lower bound each config sits.",
+        "",
+        "| CLI (both tx / rx) | Shannon | Our cliff | Gap |",
+        "|---|---:|---:|---:|",
+    ]
+    shannon_rows = []
+    for r in results:
+        cliff_text = f"**{r.cliff_snr_db:+.0f} dB**" if r.cliff_snr_db is not None else "not reached"
+        gap_text = (
+            f"{r.cliff_snr_db - r.shannon_snr_db:.1f} dB"
+            if r.cliff_snr_db is not None
+            else "n/a"
+        )
+        shannon_rows.append(
+            f"| {_cli_snippet(r.config)} | {r.shannon_snr_db:+.1f} dB | "
+            f"{cliff_text} | {gap_text} |"
+        )
+    return "\n".join(header + rows + shannon_header + shannon_rows)
 
 
 def update_readme(table_md: str, readme_path: Path) -> None:
