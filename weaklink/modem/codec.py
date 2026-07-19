@@ -256,12 +256,25 @@ import logging as _logging
 _log = _logging.getLogger("weaklink.decode")
 
 
-def decode(samples: np.ndarray, config: ModemConfig, *, streaming: bool = False):
+def decode(
+    samples: np.ndarray,
+    config: ModemConfig,
+    *,
+    streaming: bool = False,
+    streaming_state: dict | None = None,
+):
     """Decode audio to bytes; undecodable blocks are dropped.
 
     Batch mode (``streaming=False``) returns ``bytes``. Streaming mode
     returns ``(bytes, safe_cursor_samples)`` -- cursor is the last real
     preamble; keep it and slice everything before for the next call.
+
+    Cross-call state (``streaming_state``): a mutable dict the caller
+    passes in and reuses across successive decode() calls in one live
+    session. Used to dedupe blocks whose copies straddle a poll
+    boundary -- with ``block_repeats > 1``, a block's copies can land in
+    two adjacent RX calls and both calls would otherwise emit it. Reset
+    the dict (or pass a fresh one) to start a new logical session.
     Coarse offset then per-preamble fine offset. Logger: ``weaklink.decode``.
     """
     if len(samples) == 0:
@@ -387,12 +400,27 @@ def decode(samples: np.ndarray, config: ModemConfig, *, streaming: bool = False)
             per_peak_offsets = per_peak_offsets + [coarse_offset]
             peaks = peaks + [virtual_end]
 
+    # Cross-call dedup set: block_indices we've already emitted in this
+    # streaming session. Honoured whenever ``streaming_state`` is
+    # passed, regardless of the ``streaming`` flag -- so a final
+    # batch-mode decode over the tail (drain) still dedups against
+    # blocks the earlier streaming calls already emitted.
+    emitted_indices: set[int] = (
+        streaming_state.setdefault("emitted", set())
+        if streaming_state is not None
+        else set()
+    )
+
     def _flush_message(msg: dict[int, bytes]) -> None:
         # Emit in block_index order. Missing indices leave a gap (a
         # single unrecoverable slot doesn't take the whole tail of a
-        # long stream with it).
+        # long stream with it). Skip indices we've already emitted in
+        # a previous streaming call.
         for i in sorted(msg.keys()):
+            if i in emitted_indices:
+                continue
             output.extend(msg[i])
+            emitted_indices.add(i)
 
     stride = block_length + len(preamble)
     current_msg: dict[int, bytes] = {}
@@ -444,6 +472,9 @@ def decode(samples: np.ndarray, config: ModemConfig, *, streaming: bool = False)
             _log.debug("slot %d span %d: message boundary", slot_i, span)
             _flush_message(current_msg)
             current_msg = {}
+            # New message starts fresh -- previous message's block_indices
+            # no longer act as dedup keys against the new one.
+            emitted_indices.clear()
             expected_block_index = 0
             copies_seen_this_block = 0
             combining_buffer.clear()

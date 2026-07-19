@@ -30,6 +30,21 @@ def write_wav(path: Path | str, samples: np.ndarray, sample_rate: float) -> None
     soundfile.write(str(path), np.asarray(samples, dtype=np.float32), int(round(sample_rate)))
 
 
+def write_wav_stream(path: Path | str, sample_chunks, sample_rate: float) -> None:
+    """Streaming sink: consume float32 sample chunks from an iterator and
+    append them to a WAV file. Same shape as :func:`play_stream` -- WAV
+    output is just another sink at the end of the sample-chunk chain, so
+    tx code paths don't branch on target."""
+    import soundfile
+
+    rate = int(round(sample_rate))
+    with soundfile.SoundFile(
+        str(path), mode="w", samplerate=rate, channels=1, subtype="FLOAT",
+    ) as sf:
+        for chunk in sample_chunks:
+            sf.write(np.asarray(chunk, dtype=np.float32).reshape(-1))
+
+
 def read_wav(path: Path | str, *, expected_sample_rate: float | None = None) -> tuple[np.ndarray, int]:
     """Read a WAV file, downmixing to mono if needed.
 
@@ -46,6 +61,33 @@ def read_wav(path: Path | str, *, expected_sample_rate: float | None = None) -> 
             f"WAV sample rate {sample_rate} Hz does not match expected {expected_sample_rate} Hz"
         )
     return data, int(sample_rate)
+
+
+def read_wav_chunks(
+    path: Path | str,
+    *,
+    chunk_seconds: float = 0.1,
+    expected_sample_rate: float | None = None,
+):
+    """Streaming source: yield float32 mono sample chunks from a WAV.
+    Mirrors :class:`LiveInputStream`'s callback signature (chunks land
+    at ~``chunk_seconds`` cadence, like a live audio poll), so rx code
+    paths don't branch on WAV vs live."""
+    import soundfile
+
+    with soundfile.SoundFile(str(path)) as sf:
+        if expected_sample_rate is not None and int(round(expected_sample_rate)) != sf.samplerate:
+            raise ValueError(
+                f"WAV sample rate {sf.samplerate} Hz does not match expected {expected_sample_rate} Hz"
+            )
+        chunk_frames = max(1, int(chunk_seconds * sf.samplerate))
+        while True:
+            data = sf.read(chunk_frames, dtype="float32", always_2d=False)
+            if data.shape[0] == 0:
+                return
+            if data.ndim > 1:
+                data = data.mean(axis=1).astype(np.float32)
+            yield data
 
 
 @dataclass

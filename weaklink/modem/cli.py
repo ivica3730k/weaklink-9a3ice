@@ -205,26 +205,15 @@ def _pilot_signal(config: ModemConfig, duration_seconds: float) -> "np.ndarray":
 def _run_tx(args: argparse.Namespace) -> int:
     import numpy as np
 
+    from weaklink.modem.audio import play_stream, write_wav_stream
+
     config = _make_config(args)
-    if args.modem_wav is not None:
-        # WAV mode reads all of stdin first (WAV is a random-access
-        # format anyway -- we need the total length before writing the
-        # header).
-        from weaklink.modem.audio import write_wav
-
-        payload = sys.stdin.buffer.read()
-        samples = encode(payload, config)
-        write_wav(args.modem_wav, samples, config.waveform.sample_rate)
-        return 0
-
-    from weaklink.modem.audio import play_stream
-
     sample_rate = config.waveform.sample_rate
-    # Leading pilot is unconditional (short bursts otherwise fall below
-    # _LIVE_TX_MIN_SECONDS). For truly long streams the "bring the
-    # signal up to 1 s" clause is a no-op, so we split the min-duration
-    # padding across leading pilot only when we know the signal length
-    # (WAV path). For streaming, use symbol-space floor + fixed seconds.
+
+    # Same encoder + same pilot padding regardless of output. WAV sinks
+    # and live-audio sinks both consume the same sample-chunk iterator;
+    # only the last hop differs. Keeping one path means WAV tests
+    # exercise exactly what live rx sees.
     leading_pilot_seconds = max(
         _LIVE_TX_PILOT_MIN_SECONDS,
         _LIVE_TX_PILOT_MIN_SYMBOLS / config.waveform.baud,
@@ -248,21 +237,28 @@ def _run_tx(args: argparse.Namespace) -> int:
             yield audio
         yield trailing_pilot
 
-    play_stream(sample_chunks(), sample_rate, device=args.modem_audio_output)
+    if args.modem_wav is not None:
+        write_wav_stream(args.modem_wav, sample_chunks(), sample_rate)
+    else:
+        play_stream(sample_chunks(), sample_rate, device=args.modem_audio_output)
     return 0
 
 
 def _run_rx(args: argparse.Namespace) -> int:
-    import numpy as np
-
     config = _make_config(args)
     if args.modem_wav is not None:
-        # File mode: one-shot decode of the whole WAV.
-        from weaklink.modem.audio import read_wav
+        # WAV mode drives the same streaming decoder as live rx, just
+        # from a WAV chunk iterator instead of a mic callback -- same
+        # code path exercised by tests.
+        from weaklink.modem.audio import read_wav_chunks
 
-        samples, _ = read_wav(args.modem_wav, expected_sample_rate=config.waveform.sample_rate)
-        decoded = decode(np.asarray(samples), config)
-        sys.stdout.buffer.write(decoded)
+        pump = _StreamingRxPump(config, output=sys.stdout.buffer)
+        for chunk in read_wav_chunks(
+            args.modem_wav, chunk_seconds=0.1,
+            expected_sample_rate=config.waveform.sample_rate,
+        ):
+            pump.push(chunk)
+        pump.drain()
         sys.stdout.buffer.flush()
         return 0
 
@@ -270,6 +266,131 @@ def _run_rx(args: argparse.Namespace) -> int:
     # re-decode the growing buffer once per second and print any newly-decoded
     # bytes to stdout immediately. Ctrl-C stops recording.
     return _live_stream_decode(config, audio_input=args.modem_audio_input)
+
+
+class _StreamingRxPump:
+    """Chunk-in, decoded-bytes-out streaming rx state. Same code path
+    for live audio and WAV -- callers push audio chunks as they arrive
+    and stdout-like ``output`` receives decoded bytes."""
+
+    def __init__(self, config: ModemConfig, output) -> None:
+        import numpy as np
+
+        from weaklink.modem.codec import _block_symbol_length  # noqa: WPS433
+
+        self._np = np
+        self.config = config
+        self.output = output
+        self.sample_rate = int(round(config.waveform.sample_rate))
+        self.chunks: list = []
+        self.samples_before_buffer = 0
+        self.cursor = 0
+        # Cross-call dedup so block copies that straddle two decode()
+        # calls don't emit the block twice.
+        self.streaming_state: dict = {}
+        self._block_symbol_length = _block_symbol_length
+
+        max_group_symbols = (
+            config.sync_every_blocks * _block_symbol_length(config) * config.block_repeats
+            + 32  # preamble length
+        )
+        max_group_seconds = max_group_symbols / config.waveform.baud
+        self.max_window_samples = int(max(60.0, 3.0 * max_group_seconds) * self.sample_rate)
+
+    def push(self, chunk) -> None:
+        self.chunks.append(chunk)
+        self.try_emit()
+
+    def drain(self) -> None:
+        """Flush at end of a finite stream (WAV mode). Runs streaming
+        decode until progress stalls, then a final batch decode over
+        the tail so slots between the last preamble and the end of the
+        buffer (which streaming mode would hold for a next call that
+        will never come) still emit."""
+        np = self._np
+        while self.try_emit():
+            pass
+        if not self.chunks:
+            return
+        buffer = np.concatenate(self.chunks).reshape(-1)
+        cursor_in_buffer = max(0, self.cursor - self.samples_before_buffer)
+        tail = buffer[cursor_in_buffer:]
+        if tail.size == 0:
+            return
+        decoded = decode(
+            tail, self.config, streaming=False,
+            streaming_state=self.streaming_state,
+        )
+        if decoded:
+            self.output.write(decoded)
+            try:
+                self.output.flush()
+            except (AttributeError, OSError):
+                pass
+        self.chunks.clear()
+        self.samples_before_buffer += buffer.size
+
+    def _total_buffered(self) -> int:
+        return self.samples_before_buffer + sum(c.size for c in self.chunks)
+
+    def try_emit(self) -> bool:
+        """Attempt one decode pass over the currently buffered audio.
+        Returns True if the buffer actually shrank (i.e. progress made),
+        so callers can loop drain() until it returns False."""
+        np = self._np
+        if not self.chunks:
+            return False
+        total_samples_seen = self._total_buffered()
+        preamble_length_symbols = 32
+        block_symbols = self._block_symbol_length(self.config)
+        min_group_symbols = 2 * preamble_length_symbols + block_symbols
+        min_wait_samples = int(
+            min_group_symbols / self.config.waveform.baud * self.sample_rate
+        )
+        if total_samples_seen - self.cursor < min_wait_samples:
+            return False
+        buffer = np.concatenate(self.chunks).reshape(-1)
+        buffer_start_stream_pos = self.samples_before_buffer
+        cursor_in_buffer = max(0, self.cursor - buffer_start_stream_pos)
+        window = buffer[cursor_in_buffer:]
+        if window.size < self.sample_rate:
+            return False
+        decoded, safe_cursor_offset = decode(
+            window, self.config, streaming=True, streaming_state=self.streaming_state,
+        )
+        progress = safe_cursor_offset > 0 or bool(decoded)
+        if decoded:
+            self.output.write(decoded)
+            try:
+                self.output.flush()
+            except (AttributeError, OSError):
+                pass
+        self.cursor = buffer_start_stream_pos + cursor_in_buffer + safe_cursor_offset
+
+        while self.chunks:
+            first_chunk_end = self.samples_before_buffer + self.chunks[0].size
+            if first_chunk_end <= self.cursor:
+                self.samples_before_buffer += self.chunks[0].size
+                self.chunks.pop(0)
+            else:
+                break
+        overflow = (
+            self._total_buffered() - self.samples_before_buffer - self.max_window_samples
+        )
+        while overflow > 0 and self.chunks:
+            drop = min(overflow, self.chunks[0].size)
+            if drop >= self.chunks[0].size:
+                self.samples_before_buffer += self.chunks[0].size
+                self.chunks.pop(0)
+            else:
+                self.chunks[0] = self.chunks[0][drop:]
+                self.samples_before_buffer += drop
+            overflow = (
+                self._total_buffered() - self.samples_before_buffer - self.max_window_samples
+            )
+            if self.cursor < self.samples_before_buffer:
+                self.cursor = self.samples_before_buffer
+        return progress
 
 
 def _live_stream_decode(config: ModemConfig, *, audio_input: str | None = None) -> int:
@@ -286,93 +407,27 @@ def _live_stream_decode(config: ModemConfig, *, audio_input: str | None = None) 
         _log.debug("audio input hint %r -> %s", hint, target.describe())
     sample_rate = int(round(config.waveform.sample_rate))
 
-    # Rolling buffer + sample cursor. ``samples_before_buffer`` = samples
-    # already dropped off the head; ``cursor`` = earliest stream position
-    # still relevant to future decodes.
-    chunks: list[np.ndarray] = []
-    samples_before_buffer = 0
-    cursor = 0
-
-    # Buffer cap scales with baud: 9 baud groups are ~50 s so a fixed 60 s
-    # cap would drop the leading preamble before the trailing one lands.
-    from weaklink.modem.codec import _block_symbol_length  # noqa: WPS433
-
-    _max_group_symbols = (
-        config.sync_every_blocks * _block_symbol_length(config) * config.block_repeats
-        + 32  # preamble length
-    )
-    _max_group_seconds = _max_group_symbols / config.waveform.baud
-    MAX_WINDOW_SAMPLES = int(max(60.0, 3.0 * _max_group_seconds) * sample_rate)
+    pump = _StreamingRxPump(config, output=sys.stdout.buffer)
     _log.debug(
-        "live rx buffer cap: %.1f s (%.1f s per group)",
-        MAX_WINDOW_SAMPLES / sample_rate, _max_group_seconds,
+        "live rx buffer cap: %.1f s",
+        pump.max_window_samples / sample_rate,
     )
 
     def _callback(indata_1d: np.ndarray) -> None:
-        chunks.append(indata_1d)
+        # Don't call pump.push here -- try_emit runs numpy-heavy work
+        # and mustn't block the audio callback. Just buffer the chunk.
+        pump.chunks.append(indata_1d)
 
     _log.debug("live rx: polling every 100 ms, source %s", target.describe())
 
-    def _total_buffered() -> int:
-        return samples_before_buffer + sum(chunk.size for chunk in chunks)
-
-    def _try_emit_from_buffer() -> None:
-        nonlocal samples_before_buffer, cursor
-        if not chunks:
-            return
-        total_samples_seen = _total_buffered()
-        # Smallest window that could plausibly contain a decodable group
-        # (two preambles + one block). 240 ms at 1200 baud, 32 s at 9.
-        preamble_length_symbols = 32
-        block_symbols = _block_symbol_length(config)
-        min_group_symbols = 2 * preamble_length_symbols + block_symbols
-        min_wait_samples = int(min_group_symbols / config.waveform.baud * sample_rate)
-        if total_samples_seen - cursor < min_wait_samples:
-            return
-        # Concatenate current chunks. Slice to start at the cursor.
-        buffer = np.concatenate(chunks).reshape(-1)
-        buffer_start_stream_pos = samples_before_buffer
-        cursor_in_buffer = max(0, cursor - buffer_start_stream_pos)
-        window = buffer[cursor_in_buffer:]
-        if window.size < sample_rate:
-            return
-        decoded, safe_cursor_offset = decode(window, config, streaming=True)
-        if decoded:
-            sys.stdout.buffer.write(decoded)
-            sys.stdout.buffer.flush()
-        # Advance the cursor by however much the decoder was confident about.
-        cursor = buffer_start_stream_pos + cursor_in_buffer + safe_cursor_offset
-
-        # Trim the retained audio: drop chunks that are entirely before the cursor.
-        while chunks:
-            first_chunk_end_stream_pos = samples_before_buffer + chunks[0].size
-            if first_chunk_end_stream_pos <= cursor:
-                samples_before_buffer += chunks[0].size
-                chunks.pop(0)
-            else:
-                break
-        # Cap enforcement: drop oldest if nothing decoded in a long time.
-        overflow = _total_buffered() - samples_before_buffer - MAX_WINDOW_SAMPLES
-        while overflow > 0 and chunks:
-            drop = min(overflow, chunks[0].size)
-            if drop >= chunks[0].size:
-                samples_before_buffer += chunks[0].size
-                chunks.pop(0)
-            else:
-                chunks[0] = chunks[0][drop:]
-                samples_before_buffer += drop
-            overflow = _total_buffered() - samples_before_buffer - MAX_WINDOW_SAMPLES
-            if cursor < samples_before_buffer:
-                cursor = samples_before_buffer  # can't go back in time
-
     def _log_audio_snapshot() -> None:
         """One-second audio-level snapshot: peak + RMS."""
-        if not chunks:
+        if not pump.chunks:
             return
         recent_needed = sample_rate  # 1 second
         recent: list[np.ndarray] = []
         recent_len = 0
-        for chunk in reversed(chunks):
+        for chunk in reversed(pump.chunks):
             recent.append(chunk)
             recent_len += chunk.size
             if recent_len >= recent_needed:
@@ -393,12 +448,10 @@ def _live_stream_decode(config: ModemConfig, *, audio_input: str | None = None) 
             while True:
                 time.sleep(poll_ms / 1000.0)
                 poll_counter += 1
-                _try_emit_from_buffer()
+                pump.try_emit()
                 if poll_counter % snapshot_every_polls == 0:
                     _log_audio_snapshot()
     except KeyboardInterrupt:
-        # No final decode -- polling already emitted anything decodable,
-        # and re-decoding the full buffer would add a Ctrl-C hang.
         _log.debug("live rx: keyboard interrupt, exiting")
     return 0
 
