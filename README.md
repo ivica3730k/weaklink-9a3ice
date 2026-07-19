@@ -48,7 +48,7 @@ throughout the rest of the README.
 - Per-block pseudorandom interleaver — 32-cycle shuffle beats bursts *and* periodic noise (SMPS, mains hum).
 - 1-byte length header per block — strips zero-padding, no trailing NUL leakage.
 - 2-byte block-index header — dedupes retry copies and pins block position.
-- `--modem-block-repeats N` — same block N times, soft-LLRs combined at RX.
+- `--modem-block-repeats N` — N copies per block, each permuted differently; RX soft-combines LLRs for real diversity.
 
 **Synchronisation & channel**
 - 32-symbol PN preamble — deterministic pseudo-random pattern bracketing every slot.
@@ -119,12 +119,12 @@ Four hard-coded baud presets. Any other `--modem-baud` value raises
 point pretending arbitrary bauds work. Both sides launch with matching
 flags (there is no handshake, so config has to agree).
 
-| Baud | 4-FSK tones (Hz) | Total spread | Fits 2.7 kHz SSB? | Approx cliff (SNR in 3 kHz) |
-|---:|---|---:|---|---:|
-| 9 | 1350 / 1450 / 1550 / 1650 | 300 Hz | ✓ | ≈ −20 dB |
-| 45 | 1200 / 1400 / 1600 / 1800 | 600 Hz | ✓ | ≈ −14 dB |
-| 300 | 1050 / 1350 / 1650 / 1950 | 900 Hz | ✓ | ≈ −3 dB |
-| 1200 | 500 / 1700 / 2900 / 4100 | 3600 Hz | ✗ (wideband only) | ≈ +2 dB |
+| Baud | 4-FSK tones (Hz) | Total spread | Fits 2.7 kHz SSB? | Default repeats | Approx cliff (SNR in 3 kHz) |
+|---:|---|---:|---|---:|---:|
+| 9 | 1350 / 1450 / 1550 / 1650 | 300 Hz | ✓ | 2× | ≈ 0 dB (see roadmap) |
+| 45 | 1200 / 1400 / 1600 / 1800 | 600 Hz | ✓ | 4× | ≈ −14 dB |
+| 300 | 1050 / 1350 / 1650 / 1950 | 900 Hz | ✓ | 2× | ≈ −5 dB |
+| 1200 | 500 / 1700 / 2900 / 4100 | 3600 Hz | ✗ (wideband only) | 2× | ≈ +2 dB |
 
 **Fast, clean channels** (default, 300 baud, ~1 kbps):
 ```bash
@@ -147,9 +147,10 @@ flags (there is no handshake, so config has to agree).
 ./weaklink-9a3ice-linux-x86_64-latest tx --modem-baud 1200 < msg.txt
 ```
 
-Add `--modem-block-repeats 2` (or 4, 8) on both sides for more coding gain
-at the cost of proportionally longer transmission — see the SNR table
-below for exact cliff shifts.
+Override `--modem-block-repeats N` on both sides for more (or fewer) copies:
+each doubling buys ~2–3 dB of AWGN margin via soft-LLR combining across the
+per-copy permutations. Cost is proportionally longer transmission — see the
+benchmark table below.
 
 ## Debugging a live-audio setup
 
@@ -330,7 +331,7 @@ prefixed `--modem-*`.
 | `--modem-rs-parity-bytes N` | preset | RS parity bytes. Corrects up to N/2 byte errors per block. |
 | `--modem-no-rs-crc` | CRC on | Skip the payload CRC-32 inside each RS block. |
 | `--modem-sync-every-blocks N` | `4` | Legacy knob (kept for buffer-cap sizing on the rx side). Doesn't affect the wire format — a preamble is emitted between every slot regardless. |
-| `--modem-block-repeats N` | preset | Each block sent N times, round-robin. RX sums soft LLRs — ~2–3 dB per doubling in AWGN + fade diversity. |
+| `--modem-block-repeats N` | preset | Each block sent N times, each copy with a different pseudorandom bit permutation. RX soft-combines LLRs across copies for real diversity gain — ~2–3 dB per doubling in AWGN, more against burst / periodic interference. |
 | `--modem-wav PATH` | live audio | WAV file mode instead of the live audio device. |
 | `--modem-audio-output NAME` | OS default | tx audio target: sounddevice index, substring of a device name (e.g. `USB`), or a Pulse sink name (e.g. `virt`). |
 | `--modem-audio-input NAME` | OS default | rx audio source: same syntax as output; Pulse sources like `virt.monitor` supported via `parec` subprocess. |

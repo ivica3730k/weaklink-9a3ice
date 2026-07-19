@@ -131,14 +131,38 @@ def _block_symbol_length(config: ModemConfig) -> int:
     return padded // BITS_PER_SYMBOL
 
 
-def _encode_one_block(payload: bytes, config: ModemConfig, block_index: int) -> np.ndarray:
+def _encode_one_block(payload: bytes, config: ModemConfig, seed_slot: int) -> np.ndarray:
     codec = config.rs_codec()
     rs_encoded = codec.encode(payload)
     payload_bits = _bytes_to_bits_msb(rs_encoded)
     coded = fec.encode(payload_bits)
-    interleaved = interleave(coded, config.interleaver, block_index=block_index)
+    interleaved = interleave(coded, config.interleaver, block_index=seed_slot)
     padded = _pad_to_multiple(interleaved, BITS_PER_SYMBOL)
     return bits_to_symbols(padded)
+
+
+def _copy_seed_slot(block_index: int, copy_index: int, block_repeats: int) -> int:
+    """Copy K of block B uses a different permutation from copy K-1: seeds
+    are spread ``cycle_size / block_repeats`` apart so successive copies
+    look uncorrelated to the RX bit-error pattern (real diversity when
+    combining soft LLRs, not just retry-until-success)."""
+    cycle = _interleaver_cycle_size()
+    step = max(1, cycle // max(1, block_repeats))
+    return (block_index + copy_index * step) % cycle
+
+
+def _valid_seed_for_block(
+    found_seed_slot: int, block_index: int, block_repeats: int
+) -> bool:
+    """Does ``found_seed_slot`` correspond to *any* of the ``block_repeats``
+    copies of ``block_index``? Sanity check so a spurious RS+CRC hit on
+    the wrong permutation doesn't get accepted."""
+    cycle = _interleaver_cycle_size()
+    step = max(1, cycle // max(1, block_repeats))
+    for copy_i in range(block_repeats):
+        if (block_index + copy_i * step) % cycle == found_seed_slot:
+            return True
+    return False
 
 
 #: Per-slot data-area header: ``[length 1B][block_index 2B]``. Length
@@ -187,11 +211,11 @@ def encode_stream(
 
     def emit_block(chunk_bytes: bytes, block_index: int) -> "Iterator[np.ndarray]":
         framed = _frame_block(chunk_bytes, block_index, payload_per_block)
-        block_symbols = _encode_one_block(framed, config, block_index=block_index)
-        merged = np.concatenate([PREAMBLE_SYMBOLS, block_symbols])
-        merged_audio = modulate(merged, config.waveform)
-        for _ in range(config.block_repeats):
-            yield merged_audio
+        for copy_index in range(config.block_repeats):
+            seed = _copy_seed_slot(block_index, copy_index, config.block_repeats)
+            block_symbols = _encode_one_block(framed, config, seed_slot=seed)
+            merged = np.concatenate([PREAMBLE_SYMBOLS, block_symbols])
+            yield modulate(merged, config.waveform)
 
     buffer = bytearray()
     block_index = 0
@@ -378,6 +402,23 @@ def decode(samples: np.ndarray, config: ModemConfig, *, streaming: bool = False)
     # block_index for R slots in a row, then advance.
     expected_block_index = 0
     copies_seen_this_block = 0
+    # Soft LLRs of consecutive slots that failed to decode independently;
+    # once we have block_repeats of them we try soft-LLR combining.
+    combining_buffer: list[np.ndarray] = []
+
+    def _record_block(
+        decoded: bytes, errors: int, header_block_index: int,
+        msg_dict: dict[int, bytes],
+    ) -> None:
+        length = decoded[0]
+        payload_area_size = len(decoded) - _HEADER_BYTES
+        if length > payload_area_size:
+            length = payload_area_size
+        if header_block_index not in msg_dict:
+            msg_dict[header_block_index] = bytes(
+                decoded[_HEADER_BYTES : _HEADER_BYTES + length]
+            )
+
     slot_i = 0
     while slot_i < len(peaks) - 1:
         slot_start = peaks[slot_i] + len(preamble)
@@ -405,6 +446,7 @@ def decode(samples: np.ndarray, config: ModemConfig, *, streaming: bool = False)
             current_msg = {}
             expected_block_index = 0
             copies_seen_this_block = 0
+            combining_buffer.clear()
             slot_i += 1
             continue
         slot_offset = per_peak_offsets[slot_i]
@@ -422,35 +464,50 @@ def decode(samples: np.ndarray, config: ModemConfig, *, streaming: bool = False)
             decoded, errors_corrected, found_seed_slot = _decode_slot_with_seed_search(
                 soft, config, codec, expected_block_index
             )
+            accepted = False
             if decoded is not None and len(decoded) >= _HEADER_BYTES:
                 header_block_index = (decoded[1] << 8) | decoded[2]
-                # Sanity: the permutation slot we brute-forced has to
-                # equal header_block_index mod cycle_size. If not, some
-                # other permutation happened to clear RS+CRC by
-                # coincidence -- drop it as unsafe.
-                cycle = _interleaver_cycle_size()
-                if header_block_index % cycle == found_seed_slot:
-                    length = decoded[0]
-                    payload_area_size = len(decoded) - _HEADER_BYTES
-                    if length > payload_area_size:
-                        length = payload_area_size
-                    slot_decoded += 1  # RS+CRC ok, regardless of dedupe
-                    if header_block_index not in current_msg:
-                        current_msg[header_block_index] = bytes(
-                            decoded[_HEADER_BYTES : _HEADER_BYTES + length]
-                        )
-                        if errors_corrected > 0:
-                            total_rs_errors_corrected += errors_corrected
-                    # Track copies. Expected stays on the same block for
-                    # the next slot until block_repeats copies are seen,
-                    # then advances -- matches the TX layout so the
-                    # seed-search hits on the first try either way.
+                if _valid_seed_for_block(
+                    found_seed_slot, header_block_index, config.block_repeats
+                ):
+                    accepted = True
+                    _record_block(
+                        decoded, errors_corrected, header_block_index,
+                        current_msg,
+                    )
+                    slot_decoded += 1
+                    if errors_corrected > 0:
+                        total_rs_errors_corrected += errors_corrected
                     copies_seen_this_block += 1
                     if copies_seen_this_block >= config.block_repeats:
                         expected_block_index = header_block_index + 1
                         copies_seen_this_block = 0
                     else:
                         expected_block_index = header_block_index
+                    combining_buffer.clear()
+            if not accepted and config.block_repeats > 1:
+                # Independent decode failed. Buffer the soft LLRs and, once
+                # we've got block_repeats copies, try summing their
+                # deinterleaved LLRs -- classical soft-combining. This is
+                # the diversity gain the per-copy permutation was designed
+                # for: two marginal copies together can clear what neither
+                # can on its own.
+                combining_buffer.append(soft)
+                if len(combining_buffer) >= config.block_repeats:
+                    dec, errs, seed = _decode_combined_copies(
+                        combining_buffer, config, codec, expected_block_index
+                    )
+                    if dec is not None and len(dec) >= _HEADER_BYTES:
+                        header_block_index = (dec[1] << 8) | dec[2]
+                        _record_block(dec, errs, header_block_index, current_msg)
+                        slot_decoded += 1
+                        if errs > 0:
+                            total_rs_errors_corrected += errs
+                        expected_block_index = header_block_index + 1
+                        copies_seen_this_block = 0
+                    # Whether combined worked or not, we've spent our shot
+                    # on this block -- clear the buffer and advance.
+                    combining_buffer.clear()
         slot_i += 1
 
     _flush_message(current_msg)
@@ -473,24 +530,66 @@ def _decode_one_block_from_soft(
     soft_bits: np.ndarray,
     config: ModemConfig,
     codec: RSBlockCodec,
-    block_index: int,
+    seed_slot: int,
 ) -> tuple[bytes | None, int]:
-    """Decode a single block from combined soft LLR bits using the permutation
-    seeded by ``block_index``.
+    """Decode a single block from soft LLR bits using the interleaver
+    permutation identified by ``seed_slot``.
 
-    Returns ``(payload, errors_corrected)``. ``errors_corrected`` is the count
-    of byte-symbols the RS outer code had to fix; zero when the block arrived
-    clean, positive when RS intervened. Returns ``(None, 0)`` on RS/CRC failure.
+    Returns ``(payload, errors_corrected)`` or ``(None, 0)`` if RS/CRC failed.
     """
     coded_bits_count = 2 * (codec.config.block_size * 8 + fec.CONSTRAINT_LENGTH - 1)
     if soft_bits.shape[0] < coded_bits_count:
         return None, 0
     deinterleaved = deinterleave_soft(
-        soft_bits, config.interleaver, coded_bits_count, block_index=block_index
+        soft_bits, config.interleaver, coded_bits_count, block_index=seed_slot
     )
     payload_bits = fec.decode(deinterleaved, num_output_bits=codec.config.block_size * 8)
     wire_bytes = _bits_to_bytes_msb(payload_bits)
     return codec.try_decode_with_stats(wire_bytes)
+
+
+def _decode_combined_copies(
+    copies_soft: list[np.ndarray],
+    config: ModemConfig,
+    codec: RSBlockCodec,
+    expected_block_index: int,
+) -> tuple[bytes | None, int, int]:
+    """Soft-LLR combine ``len(copies_soft)`` back-to-back copies of the same
+    block, then Viterbi + RS + CRC. Each copy is deinterleaved with the
+    per-copy seed slot before summing; we brute-force the candidate block
+    seed (expected first, radiating outward mod cycle_size) since the copies
+    might not decode individually. Returns ``(payload, errors, seed_slot)``.
+    """
+    coded_bits_count = 2 * (codec.config.block_size * 8 + fec.CONSTRAINT_LENGTH - 1)
+    for soft in copies_soft:
+        if soft.shape[0] < coded_bits_count:
+            return None, 0, -1
+    cycle = _interleaver_cycle_size()
+    expected_slot = expected_block_index % cycle
+    step = max(1, cycle // max(1, config.block_repeats))
+    order: list[int] = [expected_slot]
+    for delta in range(1, cycle):
+        order.append((expected_slot + delta) % cycle)
+        if len(order) >= cycle:
+            break
+        order.append((expected_slot - delta) % cycle)
+    for candidate in order:
+        combined = np.zeros(coded_bits_count, dtype=np.float64)
+        for copy_i, soft in enumerate(copies_soft):
+            per_copy_seed = (candidate + copy_i * step) % cycle
+            combined += deinterleave_soft(
+                soft, config.interleaver, coded_bits_count, block_index=per_copy_seed,
+            )
+        payload_bits = fec.decode(combined, num_output_bits=codec.config.block_size * 8)
+        wire_bytes = _bits_to_bytes_msb(payload_bits)
+        result, errors = codec.try_decode_with_stats(wire_bytes)
+        if result is not None:
+            header_block_index = (result[1] << 8) | result[2]
+            # The combined decode's ``candidate`` IS the block_index-seed
+            # base (copy 0's seed); header should mod-agree with it.
+            if header_block_index % cycle == candidate:
+                return result, errors, candidate
+    return None, 0, -1
 
 
 def _decode_slot_with_seed_search(
