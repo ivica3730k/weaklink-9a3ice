@@ -66,6 +66,17 @@ def _add_modem_args(sub: argparse.ArgumentParser) -> None:
         help="Preamble inserted every N data blocks. Preset default: 4.",
     )
     modem.add_argument(
+        "--modem-num-tones",
+        type=int,
+        default=None,
+        dest="modem_num_tones",
+        choices=(2, 4, 8, 16, 32),
+        help="Number of FSK tones (power of 2). 4 (default) is standard; "
+        "8/16/32 pack more bits per symbol at wider bandwidth and worse "
+        "cliff. 2 halves throughput but fits narrow audio paths. TX / RX "
+        "must match.",
+    )
+    modem.add_argument(
         "--modem-block-repeats",
         type=int,
         default=None,
@@ -152,10 +163,12 @@ def _make_config(args: argparse.Namespace) -> ModemConfig:
     rs_parity_bytes = args.modem_rs_parity_bytes if args.modem_rs_parity_bytes is not None else int(preset["rs_parity_bytes"])
     sync_every = args.modem_sync_every_blocks if args.modem_sync_every_blocks is not None else int(preset["sync_every_blocks"])
     block_repeats = args.modem_block_repeats if args.modem_block_repeats is not None else int(preset["block_repeats"])
+    num_tones = args.modem_num_tones if args.modem_num_tones is not None else 4
     return ModemConfig(
         waveform=WaveformConfig(
             baud=args.modem_baud,
             tone_spacing_hz=preset["tone_spacing_hz"],
+            num_tones=num_tones,
         ),
         rs_data_bytes=rs_data_bytes,
         rs_parity_bytes=rs_parity_bytes,
@@ -180,15 +193,15 @@ _LIVE_TX_MIN_SECONDS: float = 1.0
 
 
 def _pilot_signal(config: ModemConfig, duration_seconds: float) -> "np.ndarray":  # noqa: F821
-    """Random 4-FSK symbols for ``duration_seconds``. All four tones
-    exercised uniformly so the coarse-offset FFT locks cleanly."""
+    """Random M-FSK symbols for ``duration_seconds``. All tones exercised
+    uniformly so the coarse-offset FFT locks cleanly."""
     import numpy as np
 
-    from weaklink.modem.waveform import NUM_TONES, modulate
+    from weaklink.modem.waveform import modulate
 
     symbols_needed = max(1, int(round(duration_seconds * config.waveform.baud)))
     rng = np.random.default_rng(0xC0DE)
-    symbols = rng.integers(0, NUM_TONES, size=symbols_needed, dtype=np.int64)
+    symbols = rng.integers(0, config.waveform.num_tones, size=symbols_needed, dtype=np.int64)
     return modulate(symbols, config.waveform)
 
 

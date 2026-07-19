@@ -36,6 +36,7 @@ PAYLOAD_SEED: int = 0
 BAUDS: tuple[int, ...] = (45, 300, 1200)
 RS_CONFIGS: tuple[tuple[int, int], ...] = ((16, 8), (32, 8), (128, 32))
 BLOCK_REPEATS: tuple[int, ...] = (1, 2, 4, 8)
+NUM_TONES: tuple[int, ...] = (2, 4, 8, 16, 32)
 SYNC_EVERY_FIXED: int = 4
 
 
@@ -45,13 +46,18 @@ class Config:
     rs_data: int
     rs_parity: int
     block_repeats: int
+    num_tones: int = 4
     sync_every: int = SYNC_EVERY_FIXED
     payload_bytes: int = PAYLOAD_BYTES
     note: str = ""
 
     def build(self) -> ModemConfig:
         return ModemConfig(
-            waveform=WaveformConfig(baud=float(self.baud), tone_spacing_hz=float(self.baud)),
+            waveform=WaveformConfig(
+                baud=float(self.baud),
+                tone_spacing_hz=float(self.baud),
+                num_tones=self.num_tones,
+            ),
             rs_data_bytes=self.rs_data,
             rs_parity_bytes=self.rs_parity,
             rs_crc_enabled=True,
@@ -145,25 +151,35 @@ def _enumerate_configs() -> list[Config]:
     for baud in BAUDS:
         for rs_data, rs_parity in RS_CONFIGS:
             for block_repeats in BLOCK_REPEATS:
-                configs.append(
-                    Config(
+                for num_tones in NUM_TONES:
+                    cfg = Config(
                         baud=baud,
                         rs_data=rs_data,
                         rs_parity=rs_parity,
                         block_repeats=block_repeats,
+                        num_tones=num_tones,
                     )
-                )
+                    # Skip Nyquist-infeasible combos (e.g. 300 baud x 32 tones
+                    # needs 9.3 kHz of tone stack, our 18 kHz internal rate
+                    # can't).
+                    try:
+                        cfg.build()
+                    except ValueError:
+                        continue
+                    configs.append(cfg)
     return configs
 
 
 def _cli_snippet(cfg: Config) -> str:
     """One `--modem-*` per line so the table cell stays narrow."""
-    return (
-        f"`--modem-baud {cfg.baud}`<br/>"
-        f"`--modem-rs-data-bytes {cfg.rs_data}`<br/>"
-        f"`--modem-rs-parity-bytes {cfg.rs_parity}`<br/>"
-        f"`--modem-block-repeats {cfg.block_repeats}`"
-    )
+    parts = [
+        f"`--modem-baud {cfg.baud}`",
+        f"`--modem-num-tones {cfg.num_tones}`",
+        f"`--modem-rs-data-bytes {cfg.rs_data}`",
+        f"`--modem-rs-parity-bytes {cfg.rs_parity}`",
+        f"`--modem-block-repeats {cfg.block_repeats}`",
+    ]
+    return "<br/>".join(parts)
 
 
 def format_table(results: list[Result]) -> str:
@@ -171,8 +187,8 @@ def format_table(results: list[Result]) -> str:
         f"Streaming modem. Payload: {PAYLOAD_BYTES} random-ASCII bytes. Sync every "
         f"{SYNC_EVERY_FIXED} data blocks. Reference bandwidth: 3 kHz.",
         "",
-        "| Baud | CLI (both tx / rx) | Throughput | Info rate | Measured best SNR |",
-        "|---:|---|---|---:|---:|",
+        "| Baud | Tones | CLI (both tx / rx) | Throughput | Info rate | Measured best SNR |",
+        "|---:|---:|---|---|---:|---:|",
     ]
     rows = []
     for r in results:
@@ -181,7 +197,7 @@ def format_table(results: list[Result]) -> str:
         if r.config.note:
             throughput = f"{throughput}<br/><sub>{r.config.note}</sub>"
         rows.append(
-            f"| {r.config.baud} | {_cli_snippet(r.config)} | {throughput} | "
+            f"| {r.config.baud} | {r.config.num_tones} | {_cli_snippet(r.config)} | {throughput} | "
             f"{r.info_rate_bit_per_s:.1f} bit/s | {cliff_text} |"
         )
 
@@ -191,8 +207,8 @@ def format_table(results: list[Result]) -> str:
         "",
         "How far above the theoretical lower bound each config sits.",
         "",
-        "| Baud | CLI (both tx / rx) | Shannon | Measured best SNR | Gap |",
-        "|---:|---|---:|---:|---:|",
+        "| Baud | Tones | CLI (both tx / rx) | Shannon | Measured best SNR | Gap |",
+        "|---:|---:|---|---:|---:|---:|",
     ]
     shannon_rows = []
     for r in results:
@@ -203,8 +219,8 @@ def format_table(results: list[Result]) -> str:
             else "n/a"
         )
         shannon_rows.append(
-            f"| {r.config.baud} | {_cli_snippet(r.config)} | {r.shannon_snr_db:+.1f} dB | "
-            f"{cliff_text} | {gap_text} |"
+            f"| {r.config.baud} | {r.config.num_tones} | {_cli_snippet(r.config)} | "
+            f"{r.shannon_snr_db:+.1f} dB | {cliff_text} | {gap_text} |"
         )
     return "\n".join(header + rows + shannon_header + shannon_rows)
 
