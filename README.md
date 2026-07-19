@@ -35,7 +35,7 @@ throughout the rest of the README.
 - **Non-coherent demod** — Detects tones by energy alone, without tracking the transmitter's carrier phase. Simple, robust, ~3 dB behind coherent.
 - **LO offset** — Local-oscillator frequency error. Radios rarely tune exactly right; we estimate and correct up to ±500 Hz.
 - **SNR (dB)** — Signal-to-noise ratio. Negative dB = noise louder than signal. Ours are measured in a 3 kHz reference bandwidth.
-- **Shannon limit** — Theoretical lowest SNR at which a given data rate is *possible*. Our "Gap" column shows how far above it we sit.
+- **Shannon limit** — Theoretical lowest SNR at which a given data rate is *possible*. Every FEC decoder sits some dB above it.
 - **Pilot** — Short random 4-FSK burst before and after every live TX. Wakes idle audio sinks and gives the RX FFT real tone energy.
 
 ## Features
@@ -303,11 +303,6 @@ Streaming modem. Payload: 100 random-ASCII bytes. Sync every 4 data blocks. Refe
 | 9 | 28B block / 16B data / 8B parity | 8&times; | 20 chars in 462.2 s<br/><sub>9 baud floor, 20-byte payload, 8x repeat</sub> | 0.3 bit/s | **+1 dB** | -41.0 dB | 42.0 dB |
 
 <!-- BENCHMARK RESULTS END -->
-
-Shannon-limit context: the "Gap" column is how many dB above the theoretical
-lower bound each config lands at. We're roughly 10–15 dB above Shannon
-everywhere — that's the K=7 Viterbi + non-coherent detection budget. Closing
-more of the gap would need LDPC or coherent detection.
 
 ## From source (power users / macOS / hacking)
 
