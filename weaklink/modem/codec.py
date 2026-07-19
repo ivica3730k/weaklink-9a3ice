@@ -21,7 +21,12 @@ from typing import Iterable, Iterator
 import numpy as np
 
 from weaklink.modem import fec
-from weaklink.modem.interleaver import InterleaverConfig, deinterleave_soft, interleave
+from weaklink.modem.interleaver import (
+    InterleaverConfig,
+    cycle_size as _interleaver_cycle_size,
+    deinterleave_soft,
+    interleave,
+)
 from weaklink.modem.waveform import (
     BITS_PER_SYMBOL,
     NUM_TONES,
@@ -126,12 +131,12 @@ def _block_symbol_length(config: ModemConfig) -> int:
     return padded // BITS_PER_SYMBOL
 
 
-def _encode_one_block(payload: bytes, config: ModemConfig) -> np.ndarray:
+def _encode_one_block(payload: bytes, config: ModemConfig, block_index: int) -> np.ndarray:
     codec = config.rs_codec()
     rs_encoded = codec.encode(payload)
     payload_bits = _bytes_to_bits_msb(rs_encoded)
     coded = fec.encode(payload_bits)
-    interleaved = interleave(coded, config.interleaver)
+    interleaved = interleave(coded, config.interleaver, block_index=block_index)
     padded = _pad_to_multiple(interleaved, BITS_PER_SYMBOL)
     return bits_to_symbols(padded)
 
@@ -182,7 +187,7 @@ def encode_stream(
 
     def emit_block(chunk_bytes: bytes, block_index: int) -> "Iterator[np.ndarray]":
         framed = _frame_block(chunk_bytes, block_index, payload_per_block)
-        block_symbols = _encode_one_block(framed, config)
+        block_symbols = _encode_one_block(framed, config, block_index=block_index)
         merged = np.concatenate([PREAMBLE_SYMBOLS, block_symbols])
         merged_audio = modulate(merged, config.waveform)
         for _ in range(config.block_repeats):
@@ -367,6 +372,12 @@ def decode(samples: np.ndarray, config: ModemConfig, *, streaming: bool = False)
 
     stride = block_length + len(preamble)
     current_msg: dict[int, bytes] = {}
+    # Expected block_index / copies-of-this-block-seen: feeds the seed
+    # search's candidate order so the common case (no missed slots) hits
+    # on the first try. When block_repeats > 1 we expect the same
+    # block_index for R slots in a row, then advance.
+    expected_block_index = 0
+    copies_seen_this_block = 0
     slot_i = 0
     while slot_i < len(peaks) - 1:
         slot_start = peaks[slot_i] + len(preamble)
@@ -392,6 +403,8 @@ def decode(samples: np.ndarray, config: ModemConfig, *, streaming: bool = False)
             _log.debug("slot %d span %d: message boundary", slot_i, span)
             _flush_message(current_msg)
             current_msg = {}
+            expected_block_index = 0
+            copies_seen_this_block = 0
             slot_i += 1
             continue
         slot_offset = per_peak_offsets[slot_i]
@@ -406,20 +419,38 @@ def decode(samples: np.ndarray, config: ModemConfig, *, streaming: bool = False)
         if slot_mags.shape[0] >= block_length:
             slot_attempted += 1
             soft = soft_bits_from_magnitudes(slot_mags)
-            decoded, errors_corrected = _decode_one_block_from_soft(soft, config, codec)
+            decoded, errors_corrected, found_seed_slot = _decode_slot_with_seed_search(
+                soft, config, codec, expected_block_index
+            )
             if decoded is not None and len(decoded) >= _HEADER_BYTES:
-                length = decoded[0]
-                block_index = (decoded[1] << 8) | decoded[2]
-                payload_area_size = len(decoded) - _HEADER_BYTES
-                if length > payload_area_size:
-                    length = payload_area_size
-                slot_decoded += 1  # RS+CRC ok, regardless of dedupe
-                if block_index not in current_msg:
-                    current_msg[block_index] = bytes(
-                        decoded[_HEADER_BYTES : _HEADER_BYTES + length]
-                    )
-                    if errors_corrected > 0:
-                        total_rs_errors_corrected += errors_corrected
+                header_block_index = (decoded[1] << 8) | decoded[2]
+                # Sanity: the permutation slot we brute-forced has to
+                # equal header_block_index mod cycle_size. If not, some
+                # other permutation happened to clear RS+CRC by
+                # coincidence -- drop it as unsafe.
+                cycle = _interleaver_cycle_size()
+                if header_block_index % cycle == found_seed_slot:
+                    length = decoded[0]
+                    payload_area_size = len(decoded) - _HEADER_BYTES
+                    if length > payload_area_size:
+                        length = payload_area_size
+                    slot_decoded += 1  # RS+CRC ok, regardless of dedupe
+                    if header_block_index not in current_msg:
+                        current_msg[header_block_index] = bytes(
+                            decoded[_HEADER_BYTES : _HEADER_BYTES + length]
+                        )
+                        if errors_corrected > 0:
+                            total_rs_errors_corrected += errors_corrected
+                    # Track copies. Expected stays on the same block for
+                    # the next slot until block_repeats copies are seen,
+                    # then advances -- matches the TX layout so the
+                    # seed-search hits on the first try either way.
+                    copies_seen_this_block += 1
+                    if copies_seen_this_block >= config.block_repeats:
+                        expected_block_index = header_block_index + 1
+                        copies_seen_this_block = 0
+                    else:
+                        expected_block_index = header_block_index
         slot_i += 1
 
     _flush_message(current_msg)
@@ -439,21 +470,55 @@ def decode(samples: np.ndarray, config: ModemConfig, *, streaming: bool = False)
 
 
 def _decode_one_block_from_soft(
-    soft_bits: np.ndarray, config: ModemConfig, codec: RSBlockCodec
+    soft_bits: np.ndarray,
+    config: ModemConfig,
+    codec: RSBlockCodec,
+    block_index: int,
 ) -> tuple[bytes | None, int]:
-    """Decode a single block from combined soft LLR bits.
+    """Decode a single block from combined soft LLR bits using the permutation
+    seeded by ``block_index``.
 
     Returns ``(payload, errors_corrected)``. ``errors_corrected`` is the count
     of byte-symbols the RS outer code had to fix; zero when the block arrived
-    clean, positive when RS intervened.
+    clean, positive when RS intervened. Returns ``(None, 0)`` on RS/CRC failure.
     """
     coded_bits_count = 2 * (codec.config.block_size * 8 + fec.CONSTRAINT_LENGTH - 1)
     if soft_bits.shape[0] < coded_bits_count:
         return None, 0
-    deinterleaved = deinterleave_soft(soft_bits, config.interleaver, coded_bits_count)
+    deinterleaved = deinterleave_soft(
+        soft_bits, config.interleaver, coded_bits_count, block_index=block_index
+    )
     payload_bits = fec.decode(deinterleaved, num_output_bits=codec.config.block_size * 8)
     wire_bytes = _bits_to_bytes_msb(payload_bits)
     return codec.try_decode_with_stats(wire_bytes)
+
+
+def _decode_slot_with_seed_search(
+    soft_bits: np.ndarray,
+    config: ModemConfig,
+    codec: RSBlockCodec,
+    expected_block_index: int,
+) -> tuple[bytes | None, int, int]:
+    """Try each of the ``cycle_size`` permutation slots (expected first,
+    then radiating outward mod cycle_size) until RS+CRC clears. Returns
+    ``(payload, errors_corrected, seed_slot)``. Since only ``cycle_size``
+    distinct permutations exist, worst case is a fixed bound of tries
+    covering every possible bit ordering."""
+    cycle = _interleaver_cycle_size()
+    expected_slot = expected_block_index % cycle
+    # Deterministic radiating order over the cycle: 0, +1, -1, +2, -2, ...
+    # bounded by cycle_size, no repeats.
+    order: list[int] = [expected_slot]
+    for step in range(1, cycle):
+        order.append((expected_slot + step) % cycle)
+        if len(order) >= cycle:
+            break
+        order.append((expected_slot - step) % cycle)
+    for seed_slot in order:
+        payload, errors = _decode_one_block_from_soft(soft_bits, config, codec, seed_slot)
+        if payload is not None:
+            return payload, errors, seed_slot
+    return None, 0, -1
 
 
 def _find_preamble_peaks(

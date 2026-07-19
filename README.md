@@ -1,13 +1,79 @@
 # weaklink
 
 A streaming digital modem: takes arbitrary bytes and turns them into audio;
-takes audio and turns it back into bytes. Simple byte pipe — no packet
-awareness, no length field, no message vocabulary. You add whatever
+takes audio and turns it back into bytes. Simple byte pipe — no user-visible
+framing, no length field, no message vocabulary. You add whatever
 protocol on top (or don't).
+
+Both sides stream: tx encodes stdin block-by-block and pipes audio to the
+soundcard as it goes (no memory buffering, works with `tail -f`), rx
+drips decoded bytes to stdout as blocks are recovered.
 
 ![alt text](image.png)
 
 Distribution: `weaklink-9a3ice`.
+
+## Glossary
+
+Skip this if you already know the vocabulary. Terms below appear
+throughout the rest of the README.
+
+- **Baud** — Symbols per second. Higher baud = more bits/s but needs more SNR. Presets: 9, 45, 300, 1200.
+- **4-FSK** — Modulation using four distinct tones; each tone carries 2 bits.
+- **CPFSK** — Continuous-Phase FSK. Phase doesn't jump between tones — cleaner spectrum than plain FSK.
+- **Preamble** — Known 32-symbol pattern that brackets every slot. RX uses it to lock onto timing, frequency, and amplitude.
+- **PN sequence** — Pseudo-random pattern that looks like noise but is deterministic. Our preamble is a 32-symbol PN sequence.
+- **Slot** — One wire unit: a preamble followed by one RS-encoded block. Every slot decodes standalone.
+- **Block** — Fixed-size RS-encoded chunk inside a slot. Holds a slice of user bytes plus header, CRC, and parity.
+- **Reed-Solomon (RS)** — Outer error-correcting code. RS(N,K) sends K data bytes plus parity as N wire bytes; corrects up to (N-K)/2 byte errors per block.
+- **CRC-32** — 32-bit checksum inside every block. Catches errors that slipped past RS, so we know when to drop a bad block.
+- **Convolutional code (K=7, rate-1/2)** — Inner code that doubles the coded-bit rate but sharply improves error resilience.
+- **Viterbi decoder** — Standard decoder for the convolutional code. "Soft" Viterbi uses per-bit confidence instead of hard 0/1.
+- **Soft bits / LLR** — Log-Likelihood Ratio. Per-bit confidence value fed to the decoder. Massively better than hard decisions.
+- **Interleaver** — Deterministically shuffles bits before TX and unshuffles at RX. Turns bursty noise into isolated errors that FEC handles well.
+- **Per-block interleaver** — Bit shuffle changes every block (cycling through 32 permutations). Breaks periodic-noise alignment that a fixed shuffle can't.
+- **Non-coherent demod** — Detects tones by energy alone, without tracking the transmitter's carrier phase. Simple, robust, ~3 dB behind coherent.
+- **LO offset** — Local-oscillator frequency error. Radios rarely tune exactly right; we estimate and correct up to ±500 Hz.
+- **SNR (dB)** — Signal-to-noise ratio. Negative dB = noise louder than signal. Ours are measured in a 3 kHz reference bandwidth.
+- **Shannon limit** — Theoretical lowest SNR at which a given data rate is *possible*. Our "Gap" column shows how far above it we sit.
+- **Pilot** — Short random 4-FSK burst before and after every live TX. Wakes idle audio sinks and gives the RX FFT real tone energy.
+
+## Features
+
+**Error correction & data integrity**
+- Reed-Solomon RS(N,K) outer code — corrects up to K/2 byte errors per block.
+- CRC-32 inside every RS block — catches errors past the RS correction limit.
+- Rate-1/2 K=7 convolutional inner code — buys ~5 dB of coding gain.
+- Soft-decision Viterbi decoder — uses tone-magnitude LLRs, not hard bits.
+- Per-block pseudorandom interleaver — 32-cycle shuffle beats bursts *and* periodic noise (SMPS, mains hum).
+- 1-byte length header per block — strips zero-padding, no trailing NUL leakage.
+- 2-byte block-index header — dedupes retry copies and pins block position.
+- `--modem-block-repeats N` — same block N times, soft-LLRs combined at RX.
+
+**Synchronisation & channel**
+- 32-symbol PN preamble — deterministic pseudo-random pattern bracketing every slot.
+- Amplitude-normalised correlator — fade-invariant, still locks below −20 dB SNR.
+- MAD-based signal-presence gate — 6σ above noise; ignores pure-noise buffers.
+- Coarse FFT frequency-offset search — locks the LO within ±500 Hz.
+- Per-preamble fine frequency tracking — follows drift slot-by-slot at ~1 Hz.
+- Non-coherent 4-FSK CPFSK demod — no carrier-phase recovery required.
+- Spurious mid-stream peak rejection — drops false detections via stride sanity.
+- Virtual head/tail preamble projection — decodes slots whose edge preambles were chopped.
+
+**Streaming**
+- TX streams stdin — encodes block-by-block, no buffering; works with `tail -f`.
+- RX drips stdout — bytes emit as blocks decode, no wait-for-EOF.
+- Back-to-back tx sessions decoded in order — message boundaries auto-detected.
+- Missing-block gap tolerance — one lost slot doesn't strand the tail.
+- 65 535 slots per session — 2-byte index, cheap headroom for long streams.
+
+**Live audio**
+- PulseAudio / PipeWire via `paplay` / `parec` subprocess.
+- `sounddevice` / PortAudio for anything else.
+- Explicit `--modem-audio-input` / `--modem-audio-output` (index, substring, or Pulse sink).
+- WAV mode for offline encode / decode.
+- Pilot padding each side — wakes idle sinks, gives the FFT real tone energy.
+- Snappy Ctrl-C — `parec` killed cleanly, no lingering audio processes.
 
 ## Install
 
@@ -120,17 +186,53 @@ Common local-audio gotchas that this catches:
 ## Signal chain
 
 ```
-stdin ──▶ RS(N,K)+CRC blocks ──▶ conv encode (K=7, r=1/2, per-block) ──▶
-         interleave ──▶ 4-FSK CPFSK ──▶ [preamble][data]×sync_every[preamble]... ──▶ audio
-                                                                                       │
-                                                                                       ▼
-stdout ◀── strip NUL pad ◀── RS decode per block ◀── soft Viterbi ◀── deinterleave ◀──
-       ◀── preamble correlator (finds every sync boundary) ◀── non-coherent demod ◀──
+stdin ──▶ chunk into (rs_data − 3)-byte payloads ──▶ frame per block ──▶
+     RS(N,K) + CRC-32 ──▶ conv encode (K=7, r=1/2) ──▶ 8×32 interleave
+     ──▶ 4-FSK CPFSK ──▶ [pre][slot 0][pre][slot 1]...[pre] ──▶ audio
+                                                                    │
+                                                                    ▼
+stdout ◀── emit in block_index order ◀── strip zero-pad via length header
+       ◀── RS + CRC per slot ◀── soft Viterbi ◀── deinterleave
+       ◀── preamble correlator (per-slot sync) ◀── non-coherent demod ◀──
 ```
 
-At RX: sliding preamble correlator finds every sync marker, per-preamble
-fine offset tracking, then Viterbi + RS on each data block. Undecodable
-blocks are silently dropped.
+Every slot is bracketed by a preamble, so any single slot decodes
+standalone. The correlator finds each preamble independently; adjacent
+mid-stream peaks that look wrong get dropped as spurious. Message
+boundaries (between separate tx sessions) are inferred from
+non-block-length spans between preambles — one rx pipe can watch many
+tx sessions in a row.
+
+### Wire format
+
+```
+One tx session (live audio):
+
+  ┌────────┬─────┬───────┬─────┬───────┬─────┬─────┬───────┬─────┬────────┐
+  │ pilot  │ pre │slot 0 │ pre │slot 1 │ pre │ ... │slot N-1│ pre │ pilot  │
+  └────────┴─────┴───────┴─────┴───────┴─────┴─────┴───────┴─────┴────────┘
+    ~0.2 s   32     ~L      32     ~L                                ~0.2 s
+     4-FSK  syms  syms    syms   syms                                4-FSK
+     tones                                                           tones
+
+  L (block_length) depends on the preset: RS wire bytes → conv → interleave.
+  With block_repeats > 1, each slot is emitted back-to-back R times.
+
+One RS block, data area (before conv + interleave + FSK):
+
+  ┌── 1B ──┬── 2B ────┬──── rs_data − 3 B ────┬── 4B CRC ──┬── rs_parity B ──┐
+  │ length │block_idx │ payload (zero-padded) │  CRC-32    │  RS parity      │
+  └────────┴──────────┴───────────────────────┴────────────┴─────────────────┘
+    strips    dedupes    user bytes; last          integrity   corrects up to
+    trailing  copies /   block in the stream       check       parity/2 byte
+    NUL pad   picks      is short — length            ↑         errors per
+              output     header records how                     block
+              slot       many bytes are real
+```
+
+Cap: `block_idx` is 2 bytes, so a single tx session is bounded at 65 535
+slots. That's roughly 1.9 MB at the 45-baud preset (~35 hours of tx
+time), so in practice the ceiling is air time, not the header.
 
 ## SNR performance
 
@@ -227,7 +329,7 @@ prefixed `--modem-*`.
 | `--modem-rs-data-bytes N` | preset | Reed-Solomon data bytes per block. |
 | `--modem-rs-parity-bytes N` | preset | RS parity bytes. Corrects up to N/2 byte errors per block. |
 | `--modem-no-rs-crc` | CRC on | Skip the payload CRC-32 inside each RS block. |
-| `--modem-sync-every-blocks N` | `4` | Preamble inserted every N data blocks. Smaller = better resync at low SNR, higher overhead. |
+| `--modem-sync-every-blocks N` | `4` | Legacy knob (kept for buffer-cap sizing on the rx side). Doesn't affect the wire format — a preamble is emitted between every slot regardless. |
 | `--modem-block-repeats N` | preset | Each block sent N times, round-robin. RX sums soft LLRs — ~2–3 dB per doubling in AWGN + fade diversity. |
 | `--modem-wav PATH` | live audio | WAV file mode instead of the live audio device. |
 | `--modem-audio-output NAME` | OS default | tx audio target: sounddevice index, substring of a device name (e.g. `USB`), or a Pulse sink name (e.g. `virt`). |
@@ -246,10 +348,17 @@ CI runs the full suite (including the slow SNR sweeps) on every push.
 
 ## Roadmap / known limits
 
-- **No LDPC**. Would close ~2–4 dB of the Shannon gap. Was drafted then
-  removed as experimental; needs a proper girth-optimising construction.
-- **Non-coherent detection only**. Coherent Costas-loop demod would buy
-  another ~3 dB, big DSP lift.
+- **9 baud plateaus at ~0 dB SNR.** In theory a 4× baud drop should
+  buy ~6 dB; in practice we hit a floor where the 32-symbol preamble
+  window (~3.5 s) is long enough that clock/LO drift smears tone
+  energy across bins. Fixing needs pilot-aided phase tracking or
+  coherent detection, not just "slow the baud down." At 45+ baud the
+  drift window is short enough that this doesn't bite.
+- **Non-coherent detection only.** Coherent Costas-loop demod would
+  buy another ~3 dB across the board. Big DSP lift.
+- **No LDPC.** Would close ~2–4 dB of the Shannon gap. Was drafted
+  then removed as experimental; needs a proper girth-optimising
+  construction.
 
 ## License
 
