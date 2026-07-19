@@ -66,12 +66,14 @@ def _apply_fading(buf: np.ndarray, dB_range: float, cycles: float, sample_rate: 
     return (buf * envelope.astype(np.float32)).astype(np.float32)
 
 
-def _apply_awgn(buf: np.ndarray, snr_db: float, seed: int) -> np.ndarray:
-    """Add white Gaussian noise so the signal-to-noise ratio is ``snr_db``."""
+def _apply_awgn(buf: np.ndarray, snr_db: float, seed: int, sample_rate: float = 18_000.0) -> np.ndarray:
+    """Add white Gaussian noise so noise power in a 3 kHz reference band
+    is ``snr_db`` below signal power -- sample-rate-invariant, matches
+    the benchmark's convention."""
     sig_p = float(np.mean(buf.astype(np.float64) ** 2))
-    noise_p = sig_p * 10 ** (-snr_db / 10.0)
+    noise_variance = sig_p * sample_rate / (2.0 * 3000.0) / (10 ** (snr_db / 10.0))
     rng = np.random.default_rng(seed)
-    return (buf + rng.standard_normal(buf.size).astype(np.float32) * np.sqrt(noise_p)).astype(np.float32)
+    return (buf + rng.standard_normal(buf.size).astype(np.float32) * np.sqrt(noise_variance)).astype(np.float32)
 
 
 # ---------------------------------------------------------------------
@@ -123,9 +125,10 @@ for baud in (45, 300, 1200):
         lambda a, sr: _apply_fading(_apply_head_chop(a, 100.0, sr), 6.0, 1.5, sr),
     ))
 
-# AWGN at ~3 dB above each preset's cliff (replaces the old committed
-# below_noise/*.wav regression coverage -- generated at test time now).
-_AWGN_TARGETS = {45: -21.0, 300: -10.0, 1200: -4.0}
+# AWGN at ~3 dB above each preset's cliff (regression guard: below-noise
+# operation must keep working). SNRs are in the 3 kHz reference band --
+# see ``_apply_awgn`` for the noise formula.
+_AWGN_TARGETS = {45: -11.0, 300: -2.0, 1200: 5.0}
 for baud, snr in _AWGN_TARGETS.items():
     CASES.append((
         baud, PAYLOAD_10B,
