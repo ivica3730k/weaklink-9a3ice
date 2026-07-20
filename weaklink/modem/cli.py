@@ -71,9 +71,9 @@ def _add_modem_args(sub: argparse.ArgumentParser) -> None:
         type=int,
         default=None,
         dest="modem_num_tones",
-        choices=(2, 4, 8, 16, 32),
+        choices=(2, 4, 8, 16),
         help="Number of FSK tones (power of 2). 4 (default) is standard; "
-        "8/16/32 pack more bits per symbol at wider bandwidth and worse "
+        "8/16 pack more bits per symbol at wider bandwidth and worse "
         "cliff. 2 halves throughput but fits narrow audio paths. TX / RX "
         "must match.",
     )
@@ -226,6 +226,10 @@ _HAMLIB_DEFAULT_PORT: int = 4532
 #: sample or the leading pilot gets clipped by relay/AGC settling.
 _HAMLIB_PTT_LEAD_SECONDS: float = 0.1
 
+#: Symmetric tail: hold PTT past the last sample so the trailing pilot
+#: makes it onto the air before the relay drops.
+_HAMLIB_PTT_TAIL_SECONDS: float = 0.1
+
 
 def _parse_hamlib_endpoint(spec: str) -> tuple[str, int]:
     """``host``, ``host:port``, or ``:port`` -> (host, port). Bare host
@@ -261,6 +265,8 @@ def _hamlib_ptt(spec: str | None):
         _log.debug("hamlib PTT: keyed, waiting %.0f ms", _HAMLIB_PTT_LEAD_SECONDS * 1000)
         time.sleep(_HAMLIB_PTT_LEAD_SECONDS)
         yield
+        _log.debug("hamlib PTT: holding tail %.0f ms", _HAMLIB_PTT_TAIL_SECONDS * 1000)
+        time.sleep(_HAMLIB_PTT_TAIL_SECONDS)
     finally:
         try:
             sock.sendall(b"T 0\n")
