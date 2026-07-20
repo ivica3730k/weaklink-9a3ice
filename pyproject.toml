@@ -1,8 +1,9 @@
 [tool.poetry]
 name = "weaklink-modem"
 version = "0.0.0"
-description = "M-FSK streaming modem for HF SSB and wider channels: Reed-Solomon framing, soft Viterbi, round-robin block repetition, byte-pipe semantics."
+description = "N-FSK streaming modem for HF SSB and wider channels: Reed-Solomon framing, soft Viterbi, round-robin block repetition, byte-pipe semantics."
 authors = ["Ivica"]
+readme = "readme-pypi.md"
 packages = [{ include = "weaklink/modem" }]
 
 [tool.poetry.dependencies]

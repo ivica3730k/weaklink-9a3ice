@@ -295,7 +295,7 @@ def _hamlib_ptt(spec: str | None):
 
 
 def _pilot_signal(config: ModemConfig, duration_seconds: float) -> "np.ndarray":  # noqa: F821
-    """Random M-FSK symbols for ``duration_seconds``. All tones exercised
+    """Random N-FSK symbols for ``duration_seconds``. All tones exercised
     uniformly so the coarse-offset FFT locks cleanly."""
     import numpy as np
 

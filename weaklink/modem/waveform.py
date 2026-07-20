@@ -1,4 +1,4 @@
-"""M-FSK CPFSK modulator + non-coherent soft demodulator.
+"""N-FSK CPFSK modulator + non-coherent soft demodulator.
 
 Continuous-phase for narrow spectrum, non-coherent I/Q magnitudes (~3 dB
 worse than coherent but no carrier recovery). Gray-coded symbols so
@@ -98,7 +98,7 @@ class WaveformConfig:
 
 
 def bits_to_symbols(bits: bytes, num_tones: int = NUM_TONES) -> np.ndarray:
-    """Pack a 0/1 bit stream into M-FSK symbol indices."""
+    """Pack a 0/1 bit stream into N-FSK symbol indices."""
     bits_per_symbol = num_tones.bit_length() - 1
     if len(bits) % bits_per_symbol != 0:
         raise ValueError(f"bit count {len(bits)} not a multiple of {bits_per_symbol}")
