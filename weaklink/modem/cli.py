@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Sequence
 
@@ -143,6 +144,17 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="direction", required=True)
     tx_parser = subparsers.add_parser("tx", help="Encode stdin bytes and transmit (or write to WAV).")
     _add_modem_args(tx_parser)
+    tx_parser.add_argument(
+        "--hamlib-ptt",
+        nargs="?",
+        const="localhost:4532",
+        default=None,
+        dest="hamlib_ptt",
+        metavar="HOST:PORT",
+        help="Keyed PTT via rigctld before audio starts, released after. "
+        "Bare --hamlib-ptt defaults to localhost:4532; pass HOST:PORT to override. "
+        "Only applied when playing to a live audio device.",
+    )
     rx_parser = subparsers.add_parser("rx", help="Receive (or read WAV) and decode to stdout bytes.")
     _add_modem_args(rx_parser)
     return parser
@@ -192,6 +204,57 @@ _LIVE_TX_PILOT_MIN_SYMBOLS: int = 40
 _LIVE_TX_MIN_SECONDS: float = 1.0
 
 
+#: rigctld TCP default; matches --hamlib-ptt bare-flag default.
+_HAMLIB_DEFAULT_PORT: int = 4532
+
+#: PTT-to-audio guard. Radios need a beat between key-up and first
+#: sample or the leading pilot gets clipped by relay/AGC settling.
+_HAMLIB_PTT_LEAD_SECONDS: float = 0.1
+
+
+def _parse_hamlib_endpoint(spec: str) -> tuple[str, int]:
+    """``host``, ``host:port``, or ``:port`` -> (host, port). Bare host
+    keeps the default port; bare ``:port`` keeps localhost."""
+    host, sep, port_text = spec.partition(":")
+    host = host or "localhost"
+    if not sep:
+        return host, _HAMLIB_DEFAULT_PORT
+    if not port_text:
+        return host, _HAMLIB_DEFAULT_PORT
+    try:
+        port = int(port_text)
+    except ValueError as exc:
+        raise ValueError(f"invalid --hamlib-ptt port {port_text!r}") from exc
+    return host, port
+
+
+@contextmanager
+def _hamlib_ptt(spec: str | None):
+    """Key PTT on entry, release on exit. ``spec=None`` -> no-op."""
+    if spec is None:
+        yield
+        return
+
+    import socket
+    import time
+
+    host, port = _parse_hamlib_endpoint(spec)
+    _log.debug("hamlib PTT: connecting to %s:%d", host, port)
+    sock = socket.create_connection((host, port), timeout=5.0)
+    try:
+        sock.sendall(b"T 1\n")
+        _log.debug("hamlib PTT: keyed, waiting %.0f ms", _HAMLIB_PTT_LEAD_SECONDS * 1000)
+        time.sleep(_HAMLIB_PTT_LEAD_SECONDS)
+        yield
+    finally:
+        try:
+            sock.sendall(b"T 0\n")
+            _log.debug("hamlib PTT: released")
+        except OSError:
+            _log.warning("hamlib PTT: release failed", exc_info=True)
+        sock.close()
+
+
 def _pilot_signal(config: ModemConfig, duration_seconds: float) -> "np.ndarray":  # noqa: F821
     """Random M-FSK symbols for ``duration_seconds``. All tones exercised
     uniformly so the coarse-offset FFT locks cleanly."""
@@ -209,6 +272,9 @@ def _run_tx(args: argparse.Namespace) -> int:
     import numpy as np
 
     from weaklink.modem.audio import play_stream, write_wav_stream
+
+    if args.modem_wav is not None and getattr(args, "hamlib_ptt", None) is not None:
+        raise SystemExit("--hamlib-ptt is only valid with live audio TX; drop --modem-wav or --hamlib-ptt.")
 
     config = _make_config(args)
     sample_rate = config.waveform.sample_rate
@@ -243,7 +309,8 @@ def _run_tx(args: argparse.Namespace) -> int:
     if args.modem_wav is not None:
         write_wav_stream(args.modem_wav, sample_chunks(), sample_rate)
     else:
-        play_stream(sample_chunks(), sample_rate, device=args.modem_audio_output)
+        with _hamlib_ptt(getattr(args, "hamlib_ptt", None)):
+            play_stream(sample_chunks(), sample_rate, device=args.modem_audio_output)
     return 0
 
 
