@@ -64,8 +64,17 @@ Both sides must use the same `--modem-baud` (no handshake).
 
 ## Presets
 
-Three baud rates. Every preset carries 13 B of payload per RS block
-(RS(16,8) + CRC-32), so message sizes map identically across bauds.
+The three baud rates below are **presets** — starting points, not
+fixed configurations. Every preset carries 13 B of payload per RS
+block (RS(16,8) + CRC-32) by default, so message sizes and per-block
+air time in the table are what you get if you don't override anything.
+
+Every knob shown is overridable on both sides via CLI flags
+(`--modem-num-tones`, `--modem-rs-data-bytes`, `--modem-rs-parity-bytes`,
+`--modem-block-repeats`, ...), or via `ModemOptions` in the Python
+API. Changing them shifts the numbers in the table proportionally --
+smaller RS blocks and lower repeat counts mean shorter minimum
+payloads (and a worse cliff); the reverse is also true.
 
 | Baud | CLI (both tx / rx) | 4-FSK tones (Hz) | Bandwidth | Default repeats | Measured best SNR | Min live tx (13 B payload) |
 |---:|---|---|---:|---:|---:|---:|
@@ -76,8 +85,9 @@ Three baud rates. Every preset carries 13 B of payload per RS block
 SNR is measured with AWGN normalised to a 3 kHz reference band — a
 cross-baud comparison convention, not a physical channel filter.
 
-Override `--modem-block-repeats N` on both sides for more copies. Each
-doubling buys ~2–3 dB via soft-LLR combining, at proportional air time.
+Doubling `--modem-block-repeats` buys ~2–3 dB via soft-LLR combining
+at proportional air time. Full sweep of every combo we test is in
+[`results.md`](https://github.com/ivica3730k/weaklink-9a3ice/blob/main/results.md).
 
 ---
 
