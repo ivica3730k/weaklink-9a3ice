@@ -34,17 +34,15 @@ BAUD_PRESETS: dict[float, dict[str, float]] = {
     1200.0: dict(tone_spacing_hz=1200.0, rs_data_bytes=16, rs_parity_bytes=8, block_repeats=2, sync_every_blocks=4),
 }
 
-_LOGGER_NAMES = (
-    "weaklink.cli",
-    "weaklink.audio",
-    "weaklink.modem",
-)
-
-
 @contextmanager
 def _routed_loggers(logger: logging.Logger | None) -> Iterator[None]:
-    """Temporarily forward the codec/CLI/audio loggers into ``logger``
-    while yielding. When ``logger`` is ``None``, this is a no-op."""
+    """Temporarily route every ``weaklink.*`` log record into ``logger``.
+
+    Attaches a forwarder to the ``weaklink`` root; children propagate up
+    to it by default, so this catches ``weaklink.cli``, ``weaklink.audio``,
+    ``weaklink.decode``, and any future descendant without needing a
+    hard-coded name list. When ``logger`` is ``None`` this is a no-op.
+    """
     if logger is None:
         yield
         return
@@ -53,21 +51,22 @@ def _routed_loggers(logger: logging.Logger | None) -> Iterator[None]:
         def emit(self, record: logging.LogRecord) -> None:
             logger.handle(record)
 
+    root = logging.getLogger("weaklink")
     handler = _Forwarder()
-    targets = [logging.getLogger(name) for name in _LOGGER_NAMES]
-    prior = [(t, t.handlers.copy(), t.propagate, t.level) for t in targets]
+    prior_handlers = root.handlers.copy()
+    prior_propagate = root.propagate
+    prior_level = root.level
     try:
-        for t in targets:
-            t.handlers = [handler]
-            t.propagate = False
-            if t.level == logging.NOTSET or t.level > logger.level:
-                t.setLevel(logger.level or logging.DEBUG)
+        root.handlers = [handler]
+        root.propagate = False
+        wanted_level = logger.level or logging.DEBUG
+        if root.level == logging.NOTSET or root.level > wanted_level:
+            root.setLevel(wanted_level)
         yield
     finally:
-        for t, orig_handlers, orig_propagate, orig_level in prior:
-            t.handlers = orig_handlers
-            t.propagate = orig_propagate
-            t.setLevel(orig_level)
+        root.handlers = prior_handlers
+        root.propagate = prior_propagate
+        root.setLevel(prior_level)
 
 
 def _resolve_preset(baud: float) -> dict[str, float]:

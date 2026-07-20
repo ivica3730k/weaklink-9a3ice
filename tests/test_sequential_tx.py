@@ -21,7 +21,7 @@ import pytest
 from weaklink.modem.cli import BAUD_PRESETS
 from weaklink.modem.codec import ModemConfig, decode, encode
 from weaklink.modem.waveform import WaveformConfig
-from tests_weaklink.test_wav_damage import _live_tx_buffer
+from tests.test_wav_damage import _live_tx_buffer
 
 from ._streaming import pump_decode
 

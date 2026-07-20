@@ -101,11 +101,13 @@ refresh.
 
 ## Supported audio backends
 
-| Backend | Linux | macOS | Windows | Notes |
-|---|:---:|:---:|:---:|---|
-| sounddevice / PortAudio | ✓ | ✓ | ✓ | Default. Index (`5`) or name substring (`USB`). WASAPI / CoreAudio / ALSA under the hood. |
-| Pulse / PipeWire subprocess | ✓ | — | — | `paplay` / `parec`. Fires on `pulse:<id>`, `pulse:<name>`, a bare Pulse sink id resolvable by `pactl`, or a name PortAudio doesn't know (e.g. `virt.monitor`). |
-| WAV via soundfile | ✓ | ✓ | ✓ | File I/O only, via `--modem-wav`. |
+| Backend | Linux | macOS | Notes |
+|---|:---:|:---:|---|
+| sounddevice / PortAudio | ✓ | ✓ | Default. Index (`5`) or name substring (`USB`). CoreAudio / ALSA under the hood. |
+| Pulse / PipeWire subprocess | ✓ | — | `paplay` / `parec`. Fires on `pulse:<id>`, `pulse:<name>`, a bare Pulse sink id resolvable by `pactl`, or a name PortAudio doesn't know (e.g. `virt.monitor`). |
+| WAV via soundfile | ✓ | ✓ | File I/O only, via `--modem-wav`. |
+
+Windows isn't listed — no smoke testing on that platform yet. PortAudio itself supports Windows, so it's likely to work, but there's no guarantee until someone tries.
 
 ---
 

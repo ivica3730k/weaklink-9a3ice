@@ -3,8 +3,27 @@ name = "weaklink-modem"
 version = "0.0.0"
 description = "N-FSK streaming modem for HF SSB and wider channels: Reed-Solomon framing, soft Viterbi, round-robin block repetition, byte-pipe semantics."
 authors = ["Ivica"]
+license = "MIT"
 readme = "readme-pypi.md"
 packages = [{ include = "weaklink/modem" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Telecommunications Industry",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications :: Ham Radio",
+    "Topic :: Multimedia :: Sound/Audio",
+]
+
+[tool.poetry.urls]
+Homepage = "https://github.com/ivica3730k/weaklink-9a3ice"
+Repository = "https://github.com/ivica3730k/weaklink-9a3ice"
+"Bug Tracker" = "https://github.com/ivica3730k/weaklink-9a3ice/issues"
 
 [tool.poetry.dependencies]
 python = "^3.10"
@@ -33,7 +52,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.black]
 line-length = 120
-target-version = ["py310"]
+target-version = ["py312"]
 include = '\.pyi?$'
 exclude = '''
 /(
@@ -55,8 +74,8 @@ multi_line_output = 3
 include_trailing_comma = true
 
 [tool.mypy]
-python_version = "3.10"
-files = ["weaklink", "tests_weaklink"]
+python_version = "3.12"
+files = ["weaklink", "tests"]
 ignore_missing_imports = true
 check_untyped_defs = true
 warn_redundant_casts = true
