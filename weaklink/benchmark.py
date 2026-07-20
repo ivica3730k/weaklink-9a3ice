@@ -183,46 +183,33 @@ def _cli_snippet(cfg: Config) -> str:
 
 
 def format_table(results: list[Result]) -> str:
+    """Combined table -- throughput, info rate, measured cliff, Shannon
+    limit, and gap all in one row per config."""
     header = [
         f"Streaming modem. Payload: {PAYLOAD_BYTES} random-ASCII bytes. Sync every "
         f"{SYNC_EVERY_FIXED} data blocks. Reference bandwidth: 3 kHz.",
         "",
-        "| Baud | Tones | CLI (both tx / rx) | Throughput | Info rate | Measured best SNR |",
-        "|---:|---:|---|---|---:|---:|",
+        "| Baud | Tones | CLI (both tx / rx) | Throughput | Info rate | Best SNR | Shannon | Gap |",
+        "|---:|---:|---|---|---:|---:|---:|---:|",
     ]
     rows = []
     for r in results:
-        cliff_text = f"**{r.cliff_snr_db:+.0f} dB**" if r.cliff_snr_db is not None else "not reached"
+        cliff_text = (
+            f"**{r.cliff_snr_db:+.0f} dB**" if r.cliff_snr_db is not None else "not reached"
+        )
+        gap_text = (
+            f"{r.cliff_snr_db - r.shannon_snr_db:.1f} dB"
+            if r.cliff_snr_db is not None else "n/a"
+        )
         throughput = f"{r.config.payload_bytes} chars in {r.duration_seconds:.1f} s"
         if r.config.note:
             throughput = f"{throughput}<br/><sub>{r.config.note}</sub>"
         rows.append(
             f"| {r.config.baud} | {r.config.num_tones} | {_cli_snippet(r.config)} | {throughput} | "
-            f"{r.info_rate_bit_per_s:.1f} bit/s | {cliff_text} |"
+            f"{r.info_rate_bit_per_s:.1f} bit/s | {cliff_text} | "
+            f"{r.shannon_snr_db:+.1f} dB | {gap_text} |"
         )
-
-    shannon_header = [
-        "",
-        "### Shannon limit vs measured best SNR",
-        "",
-        "How far above the theoretical lower bound each config sits.",
-        "",
-        "| Baud | Tones | CLI (both tx / rx) | Shannon | Measured best SNR | Gap |",
-        "|---:|---:|---|---:|---:|---:|",
-    ]
-    shannon_rows = []
-    for r in results:
-        cliff_text = f"**{r.cliff_snr_db:+.0f} dB**" if r.cliff_snr_db is not None else "not reached"
-        gap_text = (
-            f"{r.cliff_snr_db - r.shannon_snr_db:.1f} dB"
-            if r.cliff_snr_db is not None
-            else "n/a"
-        )
-        shannon_rows.append(
-            f"| {r.config.baud} | {r.config.num_tones} | {_cli_snippet(r.config)} | "
-            f"{r.shannon_snr_db:+.1f} dB | {cliff_text} | {gap_text} |"
-        )
-    return "\n".join(header + rows + shannon_header + shannon_rows)
+    return "\n".join(header + rows)
 
 
 def update_readme(table_md: str, readme_path: Path) -> None:
@@ -286,7 +273,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--readme",
         type=Path,
-        default=Path(__file__).resolve().parent.parent / "README.md",
+        default=Path(__file__).resolve().parent.parent / "results.md",
+        help="Markdown file to update between the BENCHMARK RESULTS markers. "
+        "Defaults to ``results.md`` at repo root.",
     )
     args = parser.parse_args(argv)
 
