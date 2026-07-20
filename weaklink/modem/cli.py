@@ -145,6 +145,15 @@ def _build_parser() -> argparse.ArgumentParser:
     tx_parser = subparsers.add_parser("tx", help="Encode stdin bytes and transmit (or write to WAV).")
     _add_modem_args(tx_parser)
     tx_parser.add_argument(
+        "--modem-tx-volume",
+        type=int,
+        default=100,
+        dest="modem_tx_volume",
+        metavar="0-100",
+        help="TX peak amplitude, 0-100 (default: 100 = full scale). Bump if "
+        "downstream audio path is faint; drop to leave headroom for a hot chain.",
+    )
+    tx_parser.add_argument(
         "--hamlib-ptt",
         nargs="?",
         const="localhost:4532",
@@ -176,12 +185,18 @@ def _make_config(args: argparse.Namespace) -> ModemConfig:
     sync_every = args.modem_sync_every_blocks if args.modem_sync_every_blocks is not None else int(preset["sync_every_blocks"])
     block_repeats = args.modem_block_repeats if args.modem_block_repeats is not None else int(preset["block_repeats"])
     num_tones = args.modem_num_tones if args.modem_num_tones is not None else 4
+    tx_volume = getattr(args, "modem_tx_volume", 100)
+    if not 0 <= tx_volume <= 100:
+        raise SystemExit(f"--modem-tx-volume must be 0-100 (got {tx_volume})")
+    waveform_kwargs = dict(
+        baud=args.modem_baud,
+        tone_spacing_hz=preset["tone_spacing_hz"],
+        num_tones=num_tones,
+    )
+    if hasattr(args, "modem_tx_volume"):
+        waveform_kwargs["amplitude"] = tx_volume / 100.0
     return ModemConfig(
-        waveform=WaveformConfig(
-            baud=args.modem_baud,
-            tone_spacing_hz=preset["tone_spacing_hz"],
-            num_tones=num_tones,
-        ),
+        waveform=WaveformConfig(**waveform_kwargs),
         rs_data_bytes=rs_data_bytes,
         rs_parity_bytes=rs_parity_bytes,
         rs_crc_enabled=args.modem_rs_crc_enabled,
@@ -520,7 +535,9 @@ def _live_stream_decode(config: ModemConfig, *, audio_input: str | None = None) 
                 if poll_counter % snapshot_every_polls == 0:
                     _log_audio_snapshot()
     except KeyboardInterrupt:
-        _log.debug("live rx: keyboard interrupt, exiting")
+        _log.debug("live rx: keyboard interrupt, draining tail")
+    pump.drain()
+    sys.stdout.buffer.flush()
     return 0
 
 

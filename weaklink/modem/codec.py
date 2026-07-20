@@ -334,9 +334,13 @@ def decode(
     if not peaks:
         _log.debug("no preambles above threshold")
         # Coarse-offset cache stays unproven: drop it so the next call
-        # re-runs the FFT against fresher audio.
+        # re-runs the FFT against fresher audio. Also drop the emitted-
+        # block dedup set -- losing lock ends the session, so a fresh
+        # TX's block 0 must not be swallowed as a "duplicate" of the
+        # previous session's block 0.
         if streaming and streaming_state is not None:
             streaming_state.pop("coarse_offset_hz", None)
+            streaming_state.pop("emitted", None)
         return (b"", 0) if streaming else b""
     # Peaks found: the offset estimate is proven. Cache it if fresh so
     # subsequent calls skip the FFT.
