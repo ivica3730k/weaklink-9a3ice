@@ -75,7 +75,7 @@ def test_wav_file_is_reloadable(tmp_path: Path) -> None:
 
 def test_short_payload_clean_e2e_streaming() -> None:
     """Same roundtrip as ``test_short_payload_clean_wav_roundtrip`` but
-    through ``_StreamingRxPump`` -- exercises the live-rx code path."""
+    through ``_StreamingRxDecoder`` -- exercises the live-rx code path."""
     config = ModemConfig()
     message = b"weaklink modem streaming hello"
     samples = encode(message, config)

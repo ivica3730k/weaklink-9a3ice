@@ -1,7 +1,8 @@
 """Weaklink modem: N-FSK + convolutional FEC + soft Viterbi, audio I/O."""
 
-from weaklink.modem.api import BAUD_PRESETS, build_config, rx, tx
+from weaklink.modem.api import ModemOptions, build_config, rx, tx
 from weaklink.modem.codec import ModemConfig
+from weaklink.modem.constants import BAUD_PRESETS
 from weaklink.modem.exceptions import (
     ConfigError,
     EncodeError,
@@ -18,6 +19,7 @@ __all__ = [
     "build_config",
     "BAUD_PRESETS",
     # Config objects
+    "ModemOptions",
     "ModemConfig",
     "WaveformConfig",
     # Exceptions

@@ -9,13 +9,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from weaklink.modem.cli import (
-    BAUD_PRESETS,
-    _LIVE_TX_MIN_SECONDS,
-    _LIVE_TX_PILOT_MIN_SECONDS,
-    _LIVE_TX_PILOT_MIN_SYMBOLS,
-    _pilot_signal,
+from weaklink.modem._streaming import (
+    LIVE_TX_MIN_SECONDS as _LIVE_TX_MIN_SECONDS,
+    LIVE_TX_PILOT_MIN_SECONDS as _LIVE_TX_PILOT_MIN_SECONDS,
+    LIVE_TX_PILOT_MIN_SYMBOLS as _LIVE_TX_PILOT_MIN_SYMBOLS,
+    pilot_signal as _pilot_signal,
 )
+from weaklink.modem.api import BAUD_PRESETS
 from weaklink.modem.codec import ModemConfig, decode, encode
 from weaklink.modem.waveform import WaveformConfig
 
@@ -165,7 +165,7 @@ from ._streaming import pump_decode
 def test_decode_survives_wav_damage_e2e_streaming(
     baud: int, payload: bytes, damage: str, damage_fn,
 ) -> None:
-    """Same damage cases pumped through ``_StreamingRxPump`` -- exercises
+    """Same damage cases pumped through ``StreamingRxDecoder`` -- exercises
     the live-rx code path (chunk-by-chunk decode + cross-call state)."""
     buf, config = _live_tx_buffer(baud, payload)
     damaged = damage_fn(buf, config.waveform.sample_rate)
