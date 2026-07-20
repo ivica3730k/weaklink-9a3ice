@@ -503,12 +503,27 @@ def decode(
     combining_buffer: list[np.ndarray] = []
 
     def _observe_copy(header_block_index: int, content: bytes, errors: int) -> None:
-        """Record one copy of a block; commit to output when R copies seen."""
+        """Record one copy of a block; commit to output when R copies seen.
+
+        A copy whose bytes differ from what's already buffered is treated
+        as the start of a new TX session -- TX guarantees identical copies
+        of the same block, so a mismatch means the previous incomplete
+        pending state is stale. Flush pending + reset dedup + start fresh
+        with the new content. Costs a bytes-eq per copy in the common case.
+        """
         if header_block_index in emitted_indices:
             return
-        if header_block_index not in pending_blocks:
+        existing = pending_blocks.get(header_block_index)
+        if existing is not None and existing != content:
+            _log.debug("block %d content changed -- new session", header_block_index)
+            _flush_pending_all("content mismatch")
+            emitted_indices.clear()
             pending_blocks[header_block_index] = content
-        copies_seen[header_block_index] = copies_seen.get(header_block_index, 0) + 1
+            copies_seen[header_block_index] = 1
+        else:
+            if existing is None:
+                pending_blocks[header_block_index] = content
+            copies_seen[header_block_index] = copies_seen.get(header_block_index, 0) + 1
         if copies_seen[header_block_index] >= config.block_repeats:
             current_msg[header_block_index] = pending_blocks.pop(header_block_index)
             copies_seen.pop(header_block_index, None)
