@@ -97,10 +97,11 @@ def _add_modem_args(sub: argparse.ArgumentParser) -> None:
         type=str,
         default=None,
         dest="modem_audio_output",
-        help="Audio output device for tx. Accepts a sounddevice index (e.g. '4'), "
-        "a substring of a device name (e.g. 'USB'), or a Pulse/PipeWire sink name "
-        "(e.g. 'virt') -- see `sounddevice.query_devices()` and `pactl list short sinks`. "
-        "Default: OS default output.",
+        help="Audio output device for tx. Accepts a Pulse sink id (e.g. '42' -- "
+        "from `pactl list short sinks`), a sounddevice index (same syntax, used "
+        "when pactl doesn't know the id), a substring of a device name "
+        "(e.g. 'USB'), or a Pulse sink name (e.g. 'virt'). Prefix with 'pulse:' "
+        "to force the Pulse path (e.g. 'pulse:42'). Default: OS default output.",
     )
     modem.add_argument(
         "--modem-audio-input",
@@ -108,8 +109,8 @@ def _add_modem_args(sub: argparse.ArgumentParser) -> None:
         default=None,
         dest="modem_audio_input",
         help="Audio input device for rx. Same syntax as --modem-audio-output but "
-        "matches against input devices / Pulse source names (e.g. 'virt.monitor'). "
-        "Default: OS default input.",
+        "matches against input devices / Pulse source names (e.g. 'virt.monitor') "
+        "or ids from `pactl list short sources`. Default: OS default input.",
     )
     modem.add_argument(
         "--modem-debug",
