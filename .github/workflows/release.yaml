@@ -85,7 +85,7 @@ jobs:
             --collect-submodules weaklink \
             --collect-all sounddevice \
             --collect-all soundfile \
-            weaklink/modem/cli.py
+            src/weaklink/modem/cli.py
 
       - name: Make static binary (versioned + -latest aliases)
         run: |
@@ -147,7 +147,7 @@ jobs:
             --collect-submodules weaklink \
             --collect-all sounddevice \
             --collect-all soundfile \
-            weaklink/modem/cli.py
+            src/weaklink/modem/cli.py
 
       - name: Make static binary (versioned + -latest aliases)
         run: |
@@ -204,7 +204,7 @@ jobs:
             --collect-submodules weaklink \
             --collect-all sounddevice \
             --collect-all soundfile \
-            weaklink/modem/cli.py
+            src/weaklink/modem/cli.py
 
       - name: Stage files for packaging
         run: |
@@ -277,7 +277,7 @@ jobs:
             --collect-submodules weaklink \
             --collect-all sounddevice \
             --collect-all soundfile \
-            weaklink/modem/cli.py
+            src/weaklink/modem/cli.py
 
       - name: Stage files for packaging
         run: |
