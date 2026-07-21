@@ -97,12 +97,10 @@ at proportional air time. Full sweep of every combo we test is in
 `--modem-num-tones 1` selects on-off keying: single carrier at
 `center_hz`, symbol 0 = silence, symbol 1 = tone. Narrowest possible
 bandwidth of any mode (no tone stack — just the carrier and its
-modulation sidelobes) and Class-E-amp friendly since the amp only
-sees on/off and never has to be linear. Same 1 bit/symbol as 2-FSK
-but a few dB worse in AWGN — the trade you make for the narrow
-spectrum. Cliff at 45 baud with `block_repeats=4`: ≈ −14 dB, matching
-4-FSK at the same settings. See [`results.md`](results.md) for the
-per-baud numbers.
+modulation sidelobes). Same 1 bit/symbol as 2-FSK but a few dB worse
+in AWGN — the trade you make for the narrow spectrum. Cliff at
+45 baud with `block_repeats=4`: ≈ −14 dB, matching 4-FSK at the same
+settings. See [`results.md`](results.md) for the per-baud numbers.
 
 ### One tone at a time (constant envelope, any N)
 
@@ -111,24 +109,24 @@ Every mode in this modem is **single-tone-at-a-time CPFSK**.
 per symbol", **not** "16 frequencies playing simultaneously". The
 transmitter emits exactly one sinusoid at any instant, hopping between
 frequencies at the symbol clock. Constant envelope (PAPR = 3 dB, the
-peak-to-RMS of a pure sine) regardless of N, so every mode runs on a
-switching amp (Class-E, Class-D) — the amp only ever sees a single
-carrier.
+peak-to-RMS of a pure sine) regardless of N.
 
-Time-frequency view of a 4-FSK burst — each cell is one symbol:
+Time-frequency view of a 4-FSK burst — each column is one symbol,
+each row is one of the 4 available frequencies:
 
 ```
 freq
  ↑
- F₃ │        ██                    ██
- F₂ │              ██                          ██
- F₁ │  ██                    ██
- F₀ │                    ██
-    └────────────────────────────────────────→ time
-       s₀    s₁    s₂    s₃    s₄    s₅    s₆
+ F₃ │  .  ▓  .  .  .  ▓  .  .
+ F₂ │  .  .  .  ▓  .  .  .  .
+ F₁ │  ▓  .  .  .  .  .  ▓  .
+ F₀ │  .  .  ▓  .  ▓  .  .  ▓
+    └────────────────────────→ time
+      s₀ s₁ s₂ s₃ s₄ s₅ s₆ s₇
 
-At any single instant: one tone on the air, full amplitude.
-Over time: hops through all 4 slots. PAPR = 3 dB, always.
+Exactly one ▓ per column: at any instant, one tone at full amplitude.
+Over 8 symbols the modem has visited all 4 slots (that's what you see
+on an SDR waterfall over time), but never more than one at once.
 ```
 
 vs. what parallel multi-tone (OFDM-style; **not** this modem) would do:
@@ -136,18 +134,18 @@ vs. what parallel multi-tone (OFDM-style; **not** this modem) would do:
 ```
 freq
  ↑
- F₃ │  ██  ██  ██  ██  ██
- F₂ │  ██  ██  ██  ██  ██   N tones summed at each instant.
- F₁ │  ██  ██  ██  ██  ██   PAPR grows with N (~10·log₁₀(N)).
- F₀ │  ██  ██  ██  ██  ██   Requires linear amp — no Class-E.
-    └───────────────────────→ time
+ F₃ │  ▓  .  ▓  ▓  .  ▓  .  ▓
+ F₂ │  .  ▓  ▓  .  ▓  .  ▓  ▓   Multiple ▓ per column: N tones
+ F₁ │  ▓  ▓  .  ▓  .  ▓  ▓  .   summed at each instant. PAPR grows
+ F₀ │  ▓  .  ▓  .  ▓  ▓  .  ▓   with N (~10·log₁₀(N)).
+    └────────────────────────→ time
+      s₀ s₁ s₂ s₃ s₄ s₅ s₆ s₇
 ```
 
 Why single-tone:
 
-- **Class-E / Class-D compatible** — switching amps stay efficient because the amp never sees more than one carrier.
 - **All transmit power in one tone at a time** — maximum per-symbol SNR, no `1/N` power split across a stack.
-- **Higher N buys log₂(N) bits/symbol** (more throughput) without any PAPR cost. 16-FSK carries 4× the bits of 2-FSK at the same baud, same peak power, same amp headroom.
+- **Higher N buys log₂(N) bits/symbol** (more throughput) without any PAPR cost. 16-FSK carries 4× the bits of 2-FSK at the same baud, same peak power.
 
 On an SDR waterfall you'll see all N frequency slots "lit up" during a long transmission — that's the display integrating over time, showing every slot the modem visited. Zoom the FFT window below one symbol duration (~3.3 ms at 300 baud) and you'll see the transmitter chasing one tone across the slots instead.
 
@@ -279,10 +277,9 @@ through the same `_StreamingRxPump` the CLI uses.
 ## Glossary
 
 - **N-FSK / CPFSK** — Continuous-phase FSK with an **N-value alphabet**: N possible tone frequencies, exactly one on the air at any instant (never a stack). Each symbol picks one → log₂(N) bits/symbol. Default N=4.
-- **Single-tone-at-a-time** — The whole family from OOK through 16-FSK emits at most one sinusoid at any instant. Envelope stays constant (PAPR = 3 dB, same as a pure sine) regardless of `--modem-num-tones`. That's why every mode runs on a switching amp.
-- **OOK** — On-off keying. `num_tones=1` mode: single carrier, symbol 0 = silence, symbol 1 = tone. 1 bit/symbol like 2-FSK but at the narrowest possible bandwidth (only the carrier + modulation sidelobes). Class-E-amp friendly (no linearity requirement). Pays a few dB vs 2-FSK in AWGN.
-- **PAPR** — Peak-to-average power ratio. 0 dB = pure DC; 3 dB = pure sine; ~10·log₁₀(N) dB = N tones summed with random phases. Higher PAPR forces linear amps and PEP backoff — this modem stays at 3 dB.
-- **Class-E amp** — Switching-mode RF power amp. Highly efficient (~90%) but non-linear — only works for constant-envelope or on/off-keyed drive. Every weaklink mode qualifies.
+- **Single-tone-at-a-time** — The whole family from OOK through 16-FSK emits at most one sinusoid at any instant. Envelope stays constant (PAPR = 3 dB, same as a pure sine) regardless of `--modem-num-tones`.
+- **OOK** — On-off keying. `num_tones=1` mode: single carrier, symbol 0 = silence, symbol 1 = tone. 1 bit/symbol like 2-FSK but at the narrowest possible bandwidth (only the carrier + modulation sidelobes). Pays a few dB vs 2-FSK in AWGN.
+- **PAPR** — Peak-to-average power ratio. 0 dB = pure DC; 3 dB = pure sine; ~10·log₁₀(N) dB = N tones summed with random phases. This modem stays at 3 dB.
 - **Preamble** — Fixed 32-symbol PN sequence bracketing every slot; RX locks timing / frequency / amplitude from it.
 - **Slot** — Preamble + one RS-encoded block.
 - **Block** — RS-encoded chunk carrying header + payload.
