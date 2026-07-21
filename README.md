@@ -104,6 +104,53 @@ spectrum. Cliff at 45 baud with `block_repeats=4`: ≈ −14 dB, matching
 4-FSK at the same settings. See [`results.md`](results.md) for the
 per-baud numbers.
 
+### One tone at a time (constant envelope, any N)
+
+Every mode in this modem is **single-tone-at-a-time CPFSK**.
+`--modem-num-tones 16` means "16 possible frequencies to pick from
+per symbol", **not** "16 frequencies playing simultaneously". The
+transmitter emits exactly one sinusoid at any instant, hopping between
+frequencies at the symbol clock. Constant envelope (PAPR = 3 dB, the
+peak-to-RMS of a pure sine) regardless of N, so every mode runs on a
+switching amp (Class-E, Class-D) — the amp only ever sees a single
+carrier.
+
+Time-frequency view of a 4-FSK burst — each cell is one symbol:
+
+```
+freq
+ ↑
+ F₃ │        ██                    ██
+ F₂ │              ██                          ██
+ F₁ │  ██                    ██
+ F₀ │                    ██
+    └────────────────────────────────────────→ time
+       s₀    s₁    s₂    s₃    s₄    s₅    s₆
+
+At any single instant: one tone on the air, full amplitude.
+Over time: hops through all 4 slots. PAPR = 3 dB, always.
+```
+
+vs. what parallel multi-tone (OFDM-style; **not** this modem) would do:
+
+```
+freq
+ ↑
+ F₃ │  ██  ██  ██  ██  ██
+ F₂ │  ██  ██  ██  ██  ██   N tones summed at each instant.
+ F₁ │  ██  ██  ██  ██  ██   PAPR grows with N (~10·log₁₀(N)).
+ F₀ │  ██  ██  ██  ██  ██   Requires linear amp — no Class-E.
+    └───────────────────────→ time
+```
+
+Why single-tone:
+
+- **Class-E / Class-D compatible** — switching amps stay efficient because the amp never sees more than one carrier.
+- **All transmit power in one tone at a time** — maximum per-symbol SNR, no `1/N` power split across a stack.
+- **Higher N buys log₂(N) bits/symbol** (more throughput) without any PAPR cost. 16-FSK carries 4× the bits of 2-FSK at the same baud, same peak power, same amp headroom.
+
+On an SDR waterfall you'll see all N frequency slots "lit up" during a long transmission — that's the display integrating over time, showing every slot the modem visited. Zoom the FFT window below one symbol duration (~3.3 ms at 300 baud) and you'll see the transmitter chasing one tone across the slots instead.
+
 ---
 
 ## Debugging live audio
