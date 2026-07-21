@@ -278,8 +278,11 @@ through the same `_StreamingRxPump` the CLI uses.
 
 ## Glossary
 
-- **N-FSK / CPFSK** — N continuous-phase tones, log₂(N) bits per symbol. Default N=4.
+- **N-FSK / CPFSK** — Continuous-phase FSK with an **N-value alphabet**: N possible tone frequencies, exactly one on the air at any instant (never a stack). Each symbol picks one → log₂(N) bits/symbol. Default N=4.
+- **Single-tone-at-a-time** — The whole family from OOK through 16-FSK emits at most one sinusoid at any instant. Envelope stays constant (PAPR = 3 dB, same as a pure sine) regardless of `--modem-num-tones`. That's why every mode runs on a switching amp.
 - **OOK** — On-off keying. `num_tones=1` mode: single carrier, symbol 0 = silence, symbol 1 = tone. 1 bit/symbol like 2-FSK but at the narrowest possible bandwidth (only the carrier + modulation sidelobes). Class-E-amp friendly (no linearity requirement). Pays a few dB vs 2-FSK in AWGN.
+- **PAPR** — Peak-to-average power ratio. 0 dB = pure DC; 3 dB = pure sine; ~10·log₁₀(N) dB = N tones summed with random phases. Higher PAPR forces linear amps and PEP backoff — this modem stays at 3 dB.
+- **Class-E amp** — Switching-mode RF power amp. Highly efficient (~90%) but non-linear — only works for constant-envelope or on/off-keyed drive. Every weaklink mode qualifies.
 - **Preamble** — Fixed 32-symbol PN sequence bracketing every slot; RX locks timing / frequency / amplitude from it.
 - **Slot** — Preamble + one RS-encoded block.
 - **Block** — RS-encoded chunk carrying header + payload.
