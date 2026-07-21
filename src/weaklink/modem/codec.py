@@ -826,9 +826,14 @@ def _find_preamble_peaks(
         max(1, num_tones - 1) * preamble_length
     )
     if num_tones == 1:
-        # OOK sidelobes dominate over Gaussian noise, so the sigma-based
-        # floor is unreliable; use the sidelobe-based threshold alone.
-        candidate_threshold = sidelobe_max * peak_score
+        # OOK sidelobes aren't Gaussian -- the 2-symbol alphabet clusters
+        # near-match scores around ~0.5-0.7 of peak, which the sqrt(2*ln N)
+        # model underestimates. The sigma floor is also unreliable here.
+        # Empirically real peaks land at ~1.0 while sidelobes cap under
+        # 0.85; take max(sidelobe_max, 0.85) * peak_score so high-SNR
+        # runs don't let sub-peak sidelobes slip through as spurious
+        # message boundaries.
+        candidate_threshold = max(sidelobe_max, 0.85) * peak_score
     else:
         candidate_threshold = max(
             noise_centre + 5.0 * noise_sigma,
