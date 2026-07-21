@@ -15,13 +15,15 @@ usually 1–2 dB below.
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import random
 import string
 import time
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -39,7 +41,7 @@ PAYLOAD_BYTES: int = 100
 #: time of 4-FSK at the same baud. Cap it lower so the sweep finishes.
 OOK_PAYLOAD_BYTES: int = 16
 PAYLOAD_SEED: int = 0
-BAUDS: tuple[int, ...] = (45, 300, 1200)
+BAUDS: tuple[int, ...] = (45, 300)
 RS_CONFIGS: tuple[tuple[int, int], ...] = ((16, 8), (32, 8), (128, 32))
 BLOCK_REPEATS: tuple[int, ...] = (1, 2, 4, 8)
 NUM_TONES: tuple[int, ...] = (1, 2, 4, 8, 16)
@@ -155,22 +157,12 @@ def _find_cliff(config: Config, *, trials: int, payload: bytes) -> Result:
     )
 
 
-#: OOK is 1 bit/symbol -- one 45-baud config with block_repeats=8 would
-#: run for hours. Restrict the OOK sweep to bauds and repeat counts
-#: that finish in a reasonable time.
-OOK_BAUDS: tuple[int, ...] = (300, 1200)
-OOK_BLOCK_REPEATS: tuple[int, ...] = (1, 2)
-
-
 def _enumerate_configs() -> list[Config]:
     configs: list[Config] = []
     for baud in BAUDS:
         for rs_data, rs_parity in RS_CONFIGS:
             for block_repeats in BLOCK_REPEATS:
                 for num_tones in NUM_TONES:
-                    if num_tones == 1:
-                        if baud not in OOK_BAUDS or block_repeats not in OOK_BLOCK_REPEATS:
-                            continue
                     cfg = Config(
                         baud=baud,
                         rs_data=rs_data,
@@ -290,7 +282,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--readme",
         type=Path,
-        default=Path(__file__).resolve().parent.parent / "results.md",
+        # Walk up from src/weaklink/modem/benchmark.py -> repo root.
+        default=Path(__file__).resolve().parents[3] / "results.md",
         help="Markdown file to update between the BENCHMARK RESULTS markers. "
         "Defaults to ``results.md`` at repo root.",
     )
@@ -302,9 +295,29 @@ def main(argv: list[str] | None = None) -> int:
         print(f"no configs match --bauds {args.bauds!r}")
         return 1
 
+    # Persist every result as soon as it lands. Benchmarks take
+    # 20+ minutes; a crash on the final write step (which happened
+    # once already) shouldn't cost the raw data. The cache file is
+    # git-ignored via .gitignore.
+    cache_dir = args.readme.parent / ".benchmark-cache"
+    cache_dir.mkdir(exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    cache_path = cache_dir / f"run-{stamp}.jsonl"
+
+    def _persist(result: Result) -> None:
+        record = {
+            "config": asdict(result.config),
+            "duration_seconds": result.duration_seconds,
+            "info_rate_bit_per_s": result.info_rate_bit_per_s,
+            "cliff_snr_db": result.cliff_snr_db,
+            "shannon_snr_db": result.shannon_snr_db,
+        }
+        with cache_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record) + "\n")
+
     print(
         f"Sweeping {len(configs)} configs with {args.trials} trials/point "
-        f"across {args.workers} worker(s).\n"
+        f"across {args.workers} worker(s). Raw results -> {cache_path}\n"
     )
     started = time.perf_counter()
     results: list[Result] = [None] * len(configs)  # type: ignore[list-item]
@@ -314,11 +327,13 @@ def main(argv: list[str] | None = None) -> int:
         for i, bundle in enumerate(bundles):
             row_start = time.perf_counter()
             results[i] = _run_one(bundle)
+            _persist(results[i])
             _print_row(bundle[0], results[i], time.perf_counter() - row_start)
     else:
         with ProcessPoolExecutor(max_workers=args.workers) as pool:
             for i, result in enumerate(pool.map(_run_one, bundles)):
                 results[i] = result
+                _persist(result)
                 _print_row(configs[i], result, None)
     total = time.perf_counter() - started
     print(f"\nTotal: {total:.1f}s\n")
